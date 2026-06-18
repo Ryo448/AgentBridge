@@ -1,0 +1,57 @@
+﻿{
+  "name": "agentbridge-nvidia",
+  "version": "3.0.0",
+  "description": "Gateway local NVIDIA para Codex CLI, Claude Code e clientes OpenAI.",
+  "main": "dist/desktop/desktop/main.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "desktop": "npm run build:desktop && electron .",
+    "build:desktop": "node build.desktop.mjs",
+    "dist:win": "npm run build:desktop && electron-builder --win nsis",
+    "test": "tsx --test --test-concurrency=1 src/**/*.test.ts"
+  },
+  "author": "Tech Ryo",
+  "license": "GPL-3.0",
+  "type": "module",
+  "dependencies": {
+    "@hono/node-server": "^2.0.2",
+    "hono": "^4.12.18",
+    "uuid": "^14.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.2",
+    "electron": "^39.2.7",
+    "electron-builder": "^26.0.12",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  },
+  "build": {
+    "appId": "com.techryo.agentbridge.nvidia",
+    "productName": "AgentBridge",
+    "directories": {
+      "output": "release-agentbridge"
+    },
+    "files": [
+      "dist/desktop/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "src/desktop/assets/app-icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AgentBridge"
+    }
+  }
+}
