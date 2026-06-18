@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "agentbridge-nvidia",
   "version": "3.0.0",
   "description": "Gateway local NVIDIA para Codex CLI, Claude Code e clientes OpenAI.",

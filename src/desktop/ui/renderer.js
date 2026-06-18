@@ -288,7 +288,7 @@ function renderStatus(status) {
   elements.apiKeyValue.textContent = status.apiKey;
   elements.configPathValue.textContent = status.configPath;
   if (elements.selectedModelLabel) {
-    const active = activeModelOf(status);
+    const active = headlineModelOf(status);
     elements.selectedModelLabel.textContent = status.autoToggle
       ? `${active} · auto`
       : (active || 'deepseek-ai/deepseek-v4-pro');
@@ -339,6 +339,19 @@ let modelGridSignature = ''; // so reconstroi o grid quando catalogo/prioridade/
 function activeModelOf(status) {
   const value = status.autoToggle ? status.activeModel : status.selectedModel;
   return (value || '').trim();
+}
+
+// Modelo exibido no cabecalho "REDIRECIONAMENTO DE MODELO". No modo automatico
+// mostramos o PRIMEIRO da lista de prioridade (o alvo que o proxy tentara primeiro),
+// e nao o ultimo realmente usado. Assim o cabecalho nao "volta" para o deepseek ao
+// reiniciar o app, quando o backend ainda nao definiu activeModel por nenhuma
+// chamada. No modo manual segue o modelo fixo escolhido.
+function headlineModelOf(status) {
+  if (status.autoToggle) {
+    const ordered = orderedEntries(status);
+    if (ordered.length && ordered[0].model) return ordered[0].model.trim();
+  }
+  return activeModelOf(status);
 }
 
 function catalogOf(status) {
@@ -513,9 +526,12 @@ function buildModelGrid(status) {
   const auto = Boolean(status.autoToggle);
   const current = activeModelOf(status);
   const canRemove = catalogOf(status).length > 1;
+  // No modo automatico o "Em uso" segue sempre o primeiro da lista (prioridade).
 
   ordered.forEach((entry, index) => {
-    const isActive = entry.model === current;
+    const isFirst = index === 0;
+    // Modo manual: destaca o modelo fixo escolhido. Modo automatico: destaca o topo.
+    const isActive = auto ? isFirst : (entry.model === current);
     const card = document.createElement('div');
     card.className = 'model-card' + (isActive ? ' active' : '');
     card.dataset.model = entry.model;
