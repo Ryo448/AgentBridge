@@ -1,4 +1,4 @@
-﻿# AgentBridge NVIDIA
+# AgentBridge NVIDIA
 
 Gateway local para usar a API NVIDIA em clientes OpenAI, Codex CLI e Claude Code.
 
@@ -17,6 +17,19 @@ Documentos\AgentBridge\config.json
 
 A senha nunca e persistida. As chaves descriptografadas ficam somente na memoria
 enquanto o aplicativo esta aberto.
+
+## Build do instalador (Windows .exe)
+
+Gera o instalador NSIS em `release-agentbridge\`:
+
+```powershell
+npm install
+npm run dist:win
+```
+
+O instalador permite escolher o diretorio de instalacao, cria atalho na area de
+trabalho e no menu Iniciar. O executavel gerado fica em
+`release-agentbridge\AgentBridge Setup x.y.z.exe`.
 
 ## API local
 
