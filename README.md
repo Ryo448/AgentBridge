@@ -45,12 +45,88 @@ limite, novas requisições aguardam a virada do minuto antes de continuar.
 
 ## Modo terminal
 
+O **AgentBridge** agora tem suporte nativo para terminal — com ou sem interface
+interativa. A entrada é unificada: um único comando (`npm start`) decide
+automaticamente qual modo ativar.
+
+| Situação                                    | Modo ativado           |
+|---------------------------------------------|------------------------|
+| Terminal interativo (PowerShell, bash, etc) | **TUI** completa       |
+| Pipe, redirecionamento, CI, systemd         | **Headless** automático|
+| `--headless` ou `--no-ui`                   | **Headless** forçado   |
+
+### TUI (interface interativa no terminal)
+
+O modo TUI oferece **100% das funções do app desktop** numa interface bonita em
+ANSI, sem Electron nem dependências gráficas:
+
 ```powershell
-$env:NVIDIA_API_KEYS="nvapi-chave-1,nvapi-chave-2"
+npm install
 npm start
 ```
 
-O proxy não exige modelo padrão, então o que você colocar em `model` sempre será redirecionado para o modelo setado internamente por padrão.
+> **Dica para Windows:** use o **Windows Terminal** (recomendado) ou qualquer
+> terminal compatível com ANSI. O PowerShell padrão do Windows 11 funciona bem.
+
+**Primeira execução:** o AgentBridge mostra a tela de desbloqueio. Se ainda não
+existir um cofre, ele guia você na criação da senha mestra e no cadastro das
+chaves NVIDIA.
+
+**Execuções seguintes:** ele lê o **mesmo cofre criptografado** do desktop
+(`Documentos\AgentBridge\config.json`). A senha nunca é salva — só descriptografa
+as chaves em memória durante a sessão.
+
+#### Dashboard ao vivo
+
+Assim que você desbloqueia o cofre, o gateway sobe automaticamente e o dashboard
+mostra:
+
+- **Proxy:** estado do servidor, porta, número de chaves, delay extra
+- **Modelo:** modo manual/automático, modelo alvo, catálogo, RPM por minuto
+- **Log ao vivo:** cada requisição que passa pelo proxy, com horário e status
+
+No rodapé, os atalhos disponíveis:
+
+    S iniciar/parar · A APIs · M modelos · C castigos · P porta · D delay · I integração · L limpar log · Q sair
+
+#### Telas de configuração (atalhos)
+
+| Tecla | Tela              | O que faz                                                                 |
+|-------|-------------------|---------------------------------------------------------------------------|
+| `A`   | **APIs**          | Adiciona, edita ou remove as chaves NVIDIA (criptografadas com AES-256-GCM)|
+| `M`   | **Modelos**       | Seleciona modelo, liga **alternância automática**, reordena prioridade,   |
+|       |                   | testa modelo e edita o catálogo                                           |
+| `C`   | **Castigos (429)**| Mostra as APIs em cooldown com contagem regressiva ao vivo                |
+| `P`   | **Porta**         | Altera a porta onde o gateway escuta (1–65535)                            |
+| `D`   | **Delay**         | Ajusta o delay extra em ms antes de cada chamada NVIDIA (0–600000)        |
+| `I`   | **Integração**    | Gera snippets prontos para Codex CLI, Claude Code e API direta            |
+
+A persistência de castigos (`penalties.json`) é compartilhada com o desktop —
+os cooldowns de 429 continuam mesmo se você alternar entre TUI e Electron.
+
+### Headless (servidor puro)
+
+Para servidores, containers, Docker ou systemd — onde você não quer interface
+interativa — passe as chaves por variável de ambiente:
+
+```powershell
+# PowerShell
+$env:NVIDIA_API_KEYS = "nvapi-chave-1,nvapi-chave-2"
+npm start -- --headless
+```
+
+```bash
+# bash / zsh
+export NVIDIA_API_KEYS="nvapi-chave-1,nvapi-chave-2"
+npm start -- --headless
+```
+
+O atalho `npm run start:headless` faz a mesma coisa.
+
+O modo headless também é ativado automaticamente quando a saída **não é um
+terminal interativo** — como em pipes (`npm start | tee log.txt`), CI/CD,
+systemd ou Docker. Isso significa que o mesmo comando `npm start` funciona nos
+dois cenários sem você precisar decorar flags.
 
 ## Licença
 

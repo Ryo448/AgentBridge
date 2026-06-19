@@ -176,7 +176,7 @@ function formatStandaloneLog(event: ApiRequestLogEvent) {
   return `[${time}] Erro na API ${event.apiNumber || '?'}${elapsed}${attempt}: ${event.message}`;
 }
 
-async function startStandaloneServer() {
+export async function startStandaloneServer() {
   const apiKeys = (process.env.NVIDIA_API_KEYS || process.env.NVIDIA_API_KEY || '')
     .split(',')
     .map((value) => value.trim())
