@@ -128,9 +128,6 @@ terminal interativo** — como em pipes (`npm start | tee log.txt`), CI/CD,
 systemd ou Docker. Isso significa que o mesmo comando `npm start` funciona nos
 dois cenários sem você precisar decorar flags.
 
-## Licença
-
-GPL-3.0
 
 ---
 
@@ -169,3 +166,8 @@ Após coletar as chaves:
 4. Pronto! O proxy distribuirá automaticamente as requisições entre as chaves para respeitar o limite de 35 requisições por minuto.
 
 > **Dica Importante**: Cada conta NVIDIA suporta até 40 requisições por minuto, mas o AgentBridge limita para 35 para evitar estourar o RPM da API. Com 8+ contas, o AgentBridge alterna entre elas para dar respostas estáveis e contínuas.
+
+---
+## Licença
+
+GPL-3.0
