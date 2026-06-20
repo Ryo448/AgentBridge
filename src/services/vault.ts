@@ -12,6 +12,7 @@ import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_CATALOG,
   DEFAULT_MODEL_PRIORITY,
+  INTERNAL_API_KEY,
   REQUEST_DELAY_MS,
   type ModelCatalogEntry
 } from '../config.ts';
@@ -35,6 +36,9 @@ export type EncryptedConfig = {
   modelPriority?: string[];
   // Catalogo de modelos selecionaveis, incluindo os adicionados/editados pelo usuario.
   modelCatalog?: ModelCatalogEntry[];
+  // Chave local que os clientes precisam enviar para usar o proxy. E um segredo,
+  // entao fica criptografada igual as chaves NVIDIA. Ausente em configs antigas.
+  localApiKey?: CipherText;
   salt: string;
   verifier: CipherText;
   apiKeys: CipherText[];
@@ -52,6 +56,8 @@ export type UnlockedConfig = {
   modelPriority: string[];
   // Catalogo de modelos selecionaveis exibido no app.
   modelCatalog: ModelCatalogEntry[];
+  // Chave local exigida dos clientes (Codex/Claude/etc.).
+  localApiKey: string;
 };
 
 // Saneia um catalogo vindo do disco: descarta entradas sem `model`, normaliza
@@ -141,6 +147,10 @@ export function unlockConfig(filePath: string, password: string): UnlockedConfig
   }
 
   const modelCatalog = normalizeCatalog(stored.modelCatalog);
+  // Configs antigas nao tem localApiKey: caem para a chave padrao do config.
+  const localApiKey = stored.localApiKey
+    ? (decryptValue(stored.localApiKey, key).trim() || INTERNAL_API_KEY)
+    : INTERNAL_API_KEY;
   return {
     port: stored.port,
     requestDelayMs: normalizeRequestDelayMs(stored.requestDelayMs, stored.rateLimitMode),
@@ -148,8 +158,22 @@ export function unlockConfig(filePath: string, password: string): UnlockedConfig
     selectedModel: stored.model && stored.model.trim() ? stored.model.trim() : DEFAULT_MODEL,
     autoToggle: typeof stored.autoToggle === 'boolean' ? stored.autoToggle : DEFAULT_AUTO_TOGGLE,
     modelCatalog,
-    modelPriority: normalizePriority(stored.modelPriority, modelCatalog)
+    modelPriority: normalizePriority(stored.modelPriority, modelCatalog),
+    localApiKey
   };
+}
+
+// Diz se o arquivo de config existente JA guarda uma chave local explicita. Usado
+// pelos clientes (desktop/terminal) para decidir se pedem ao usuario para definir
+// a chave: so quando ainda nao ha nenhuma salva no config.
+export function localKeyStored(filePath: string) {
+  try {
+    if (!existsSync(filePath)) return false;
+    const stored = JSON.parse(readFileSync(filePath, 'utf8')) as EncryptedConfig;
+    return Boolean(stored && stored.localApiKey && stored.localApiKey.data);
+  } catch {
+    return false;
+  }
 }
 
 function normalizeRequestDelayMs(value: unknown, rateLimitMode?: 'smooth') {
@@ -179,6 +203,10 @@ export function saveConfig(
     autoToggle: Boolean(config.autoToggle),
     modelCatalog,
     modelPriority: normalizePriority(config.modelPriority, modelCatalog),
+    localApiKey: encryptValue(
+      (config.localApiKey && config.localApiKey.trim()) || INTERNAL_API_KEY,
+      key
+    ),
     salt: salt.toString('base64'),
     verifier: encryptValue(VERIFIER, key),
     apiKeys: config.apiKeys.map((apiKey) => encryptValue(apiKey, key))

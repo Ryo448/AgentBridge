@@ -22,6 +22,7 @@ const previewStatus = {
   provider: 'NVIDIA',
   appVersion: '3.0.0',
   apiKey: 'EuAmoORyo',
+  needLocalKey: false,
   codexBaseUrl: 'http://localhost:3000/v1',
   claudeBaseUrl: 'http://localhost:3000',
   responsesEndpoint: 'http://localhost:3000/v1/responses',
@@ -34,6 +35,7 @@ const bridge = window.agentBridge || {
   getStatus: async () => previewStatus,
   unlock: async () => ({ ...previewStatus, unlocked: true, proxyState: 'stopped' }),
   saveConfig: async () => ({ ...previewStatus, unlocked: true, keyCount: 3, proxyState: 'running' }),
+  saveLocalKey: async (value) => ({ ...previewStatus, apiKey: value, needLocalKey: false }),
   startProxy: async () => ({ ...previewStatus, unlocked: true, proxyState: 'running' }),
   stopProxy: async () => ({ ...previewStatus, unlocked: true, proxyState: 'stopped' }),
   savePort: async () => previewStatus,
@@ -60,6 +62,8 @@ const elements = Object.fromEntries([
   'messagesValue', 'apiKeyValue', 'messageLine', 'unlockModal', 'unlockForm',
   'passwordInput', 'unlockHint', 'unlockError', 'configModal', 'configForm',
   'closeConfigButton', 'apiFields', 'addApiButton',
+  'changeKeyButton', 'localKeyModal', 'localKeyForm', 'closeLocalKeyButton',
+  'localKeyInput', 'localKeyError', 'localKeyHint',
   'configPathValue', 'configError', 'rpmCounter', 'usageTerminalOutput',
   'penaltyButton', 'penaltyBadge', 'penaltyModal', 'closePenaltyButton', 'penaltyList', 'penaltyPathValue',
   'copyLogButton',
@@ -697,6 +701,62 @@ function openConfig() {
   elements.configModal.classList.remove('hidden');
 }
 
+// Modal da chave local. Abre pre-preenchido com a chave atual. Quando aberto por
+// causa de needLocalKey (sem chave salva), ao fechar encaminha para o cadastro de
+// APIs se ainda nao houver nenhuma.
+function openLocalKey() {
+  if (!elements.localKeyModal) return;
+  if (elements.localKeyInput) elements.localKeyInput.value = lastStatus.apiKey || '';
+  if (elements.localKeyError) elements.localKeyError.textContent = '';
+  elements.localKeyModal.classList.remove('hidden');
+  if (elements.localKeyInput) elements.localKeyInput.focus();
+}
+
+function closeLocalKey() {
+  if (!elements.localKeyModal) return;
+  elements.localKeyModal.classList.add('hidden');
+  // Fluxo de primeira execucao: depois da chave, segue para o cadastro de APIs.
+  if (lastStatus.unlocked && !lastStatus.keyCount && elements.configModal?.classList.contains('hidden')) {
+    openConfig();
+  }
+}
+
+if (elements.changeKeyButton) {
+  elements.changeKeyButton.addEventListener('click', () => {
+    if (!lastStatus.unlocked) {
+      elements.messageLine.querySelector('span:last-child').textContent =
+        'Desbloqueie o cofre antes de trocar a chave local.';
+      return;
+    }
+    openLocalKey();
+  });
+}
+if (elements.closeLocalKeyButton) {
+  elements.closeLocalKeyButton.addEventListener('click', closeLocalKey);
+}
+if (elements.localKeyForm) {
+  elements.localKeyForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    elements.localKeyError.textContent = '';
+    const value = elements.localKeyInput.value.trim();
+    if (value.length < 4) {
+      elements.localKeyError.textContent = 'A chave local deve ter ao menos 4 caracteres.';
+      return;
+    }
+    if (/\s/.test(value)) {
+      elements.localKeyError.textContent = 'A chave local nao pode conter espacos.';
+      return;
+    }
+    try {
+      const status = await bridge.saveLocalKey(value);
+      renderStatus(status);
+      closeLocalKey();
+    } catch (error) {
+      elements.localKeyError.textContent = error?.message || 'Nao foi possivel salvar a chave.';
+    }
+  });
+}
+
 elements.unlockForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   elements.unlockError.textContent = '';
@@ -705,7 +765,10 @@ elements.unlockForm.addEventListener('submit', async (event) => {
     elements.passwordInput.value = '';
     elements.unlockModal.classList.add('hidden');
     renderStatus(status);
-    if (!status.keyCount) openConfig();
+    // Pede a chave local primeiro quando o config ainda nao tem uma; senao, vai
+    // direto para o cadastro de APIs se nao houver nenhuma.
+    if (status.needLocalKey) openLocalKey();
+    else if (!status.keyCount) openConfig();
   } catch (error) {
     elements.unlockError.textContent = error?.message || 'Nao foi possivel desbloquear.';
   }

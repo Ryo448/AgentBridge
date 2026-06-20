@@ -20,6 +20,7 @@ import {
 } from '../config.ts';
 import {
   configExists,
+  localKeyStored,
   saveConfig,
   unlockConfig,
   type UnlockedConfig
@@ -28,6 +29,7 @@ import {
   clearRuntimeConfig,
   type ApiRequestLogEvent,
   getActiveModel,
+  getLocalApiKey,
   getRuntimeStatus,
   getSelectedModel,
   isAutoToggleEnabled,
@@ -36,6 +38,7 @@ import {
   pruneApiRequestLogs,
   setApiPenaltyUntil,
   setAutoToggle,
+  setLocalApiKey,
   setModelPriority,
   setRuntimeConfig,
   setSelectedModel
@@ -51,6 +54,10 @@ let proxyState: 'locked' | 'starting' | 'running' | 'stopped' | 'error' = 'locke
 let proxyError = '';
 let sessionPassword = '';
 let usageLog: ApiRequestLogEvent[] = [];
+// false => ainda precisamos pedir ao usuario que defina a chave local (config
+// sem chave salva ou cofre recem-criado). true enquanto bloqueado para nao
+// piscar o modal antes do desbloqueio.
+let localKeyResolved = true;
 let unlockedConfig: UnlockedConfig = {
   apiKeys: [],
   port: DEFAULT_PORT,
@@ -58,7 +65,8 @@ let unlockedConfig: UnlockedConfig = {
   selectedModel: DEFAULT_MODEL,
   autoToggle: DEFAULT_AUTO_TOGGLE,
   modelPriority: [...DEFAULT_MODEL_PRIORITY],
-  modelCatalog: DEFAULT_MODEL_CATALOG.map((item) => ({ ...item }))
+  modelCatalog: DEFAULT_MODEL_CATALOG.map((item) => ({ ...item })),
+  localApiKey: INTERNAL_API_KEY
 };
 
 function configPath() {
@@ -201,7 +209,10 @@ function getStatus() {
     modelCatalog: unlockedConfig.modelCatalog,
     provider: 'NVIDIA',
     appVersion: APP_VERSION,
-    apiKey: INTERNAL_API_KEY,
+    apiKey: getLocalApiKey(),
+    // true quando a sessao esta desbloqueada mas ainda nao ha chave local salva
+    // no config: a UI pede para o usuario definir uma.
+    needLocalKey: Boolean(sessionPassword) && !localKeyResolved,
     codexBaseUrl: `${baseUrl}/v1`,
     claudeBaseUrl: baseUrl,
     responsesEndpoint: `${baseUrl}/v1/responses`,
@@ -306,6 +317,8 @@ async function unlock(password: unknown) {
     sessionPassword = normalized;
     usageLog = [];
     setRuntimeConfig(unlockedConfig);
+    // So pede a chave local se o config ainda nao guarda uma (config antigo).
+    localKeyResolved = localKeyStored(configPath());
     loadPenalties();
     proxyState = 'stopped';
     await startProxy();
@@ -318,10 +331,13 @@ async function unlock(password: unknown) {
       selectedModel: DEFAULT_MODEL,
       autoToggle: DEFAULT_AUTO_TOGGLE,
       modelPriority: [...DEFAULT_MODEL_PRIORITY],
-      modelCatalog: DEFAULT_MODEL_CATALOG.map((item) => ({ ...item }))
+      modelCatalog: DEFAULT_MODEL_CATALOG.map((item) => ({ ...item })),
+      localApiKey: INTERNAL_API_KEY
     };
     usageLog = [];
     clearRuntimeConfig();
+    // Cofre novo: ainda nao ha chave local definida, entao a UI vai pedir.
+    localKeyResolved = false;
     proxyState = 'stopped';
   }
   broadcastStatus();
@@ -357,7 +373,8 @@ async function persistConfig(input: any) {
       : unlockedConfig.selectedModel,
     autoToggle: unlockedConfig.autoToggle,
     modelPriority: unlockedConfig.modelPriority,
-    modelCatalog: unlockedConfig.modelCatalog
+    modelCatalog: unlockedConfig.modelCatalog,
+    localApiKey: unlockedConfig.localApiKey
   };
   const shouldRestart = Boolean(proxyServer) && nextConfig.port !== unlockedConfig.port;
   if (shouldRestart) await stopProxy();
@@ -542,10 +559,30 @@ async function savePort(value: unknown) {
   return getStatus();
 }
 
+// Troca a chave local exigida dos clientes. Persistida criptografada junto da
+// config. Pode ser chamada a qualquer momento pelo botao da UI, ou no primeiro
+// desbloqueio quando o config ainda nao tem chave.
+async function saveLocalKey(value: unknown) {
+  if (!sessionPassword) throw new Error('A sessao ainda esta bloqueada.');
+  const normalized = String(value || '').trim();
+  if (normalized.length < 4) throw new Error('A chave local deve ter ao menos 4 caracteres.');
+  if (/\s/.test(normalized)) throw new Error('A chave local nao pode conter espacos.');
+  unlockedConfig.localApiKey = normalized;
+  setLocalApiKey(normalized);
+  setRuntimeConfig(unlockedConfig);
+  localKeyResolved = true;
+  if (unlockedConfig.apiKeys.length) {
+    saveConfig(configPath(), sessionPassword, unlockedConfig);
+  }
+  broadcastStatus();
+  return getStatus();
+}
+
 function registerIpc() {
   ipcMain.handle('status:get', () => getStatus());
   ipcMain.handle('vault:unlock', (_event, password) => unlock(password));
   ipcMain.handle('config:save', (_event, config) => persistConfig(config));
+  ipcMain.handle('localKey:save', (_event, value) => saveLocalKey(value));
   ipcMain.handle('proxy:start', async () => {
     await startProxy();
     return getStatus();

@@ -18,6 +18,18 @@ Documentos\AgentBridge\config.json
 A senha nunca é persistida. As chaves descriptografadas ficam somente na memória
 enquanto o aplicativo está aberto.
 
+### Chave local (autenticação dos clientes)
+
+É a chave que o Codex, o Claude Code e seus clientes precisam enviar (como
+`Authorization: Bearer ...` ou `x-api-key`) para usar o proxy. Na primeira vez
+que você abre um cofre sem chave salva, o app pede para você **definir a sua**.
+Depois disso ela é gravada **criptografada** dentro do `config.json` e lida no
+início — você **não** é perguntado de novo a cada inicialização.
+
+Para trocar quando quiser, use o botão **"Trocar chave"** na aba **API direta**.
+Quem chamar o proxy sem a chave correta recebe apenas um erro de autenticação
+genérico — a chave esperada nunca é revelada na resposta.
+
 ## Build do instalador (Windows .exe)
 
 Gera o instalador NSIS em `release-agentbridge\`:
@@ -33,7 +45,8 @@ trabalho e no menu Iniciar. O executável gerado fica em
 
 ## API local
 
-- Autenticação: `EuAmoORyo`
+- Autenticação: a **chave local** definida por você (o padrão de fábrica é
+  `EuAmoORyo` até você definir a sua). Veja [Chave local](#chave-local-autenticação-dos-clientes).
 - Chat Completions: `http://localhost:3000/v1/chat/completions`
 - Responses: `http://localhost:3000/v1/responses`
 - Anthropic Messages: `http://localhost:3000/v1/messages`
@@ -64,6 +77,7 @@ sozinho:
 Exemplo escolhendo um modelo específico:
 
 ```bash
+# troque "EuAmoORyo" pela sua chave local, caso já tenha definido uma
 curl http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer EuAmoORyo" \
   -H "Content-Type: application/json" \
@@ -126,7 +140,7 @@ mostra:
 
 No rodapé, os atalhos disponíveis:
 
-    S iniciar/parar · A APIs · M modelos · C castigos · P porta · D delay · I integração · L limpar log · Q sair
+    S iniciar/parar · A APIs · M modelos · C castigos · P porta · D delay · K chave · I integração · L limpar log · Q sair
 
 #### Telas de configuração (atalhos)
 
@@ -138,6 +152,7 @@ No rodapé, os atalhos disponíveis:
 | `C`   | **Castigos (429)**| Mostra as APIs em cooldown com contagem regressiva ao vivo                |
 | `P`   | **Porta**         | Altera a porta onde o gateway escuta (1–65535)                            |
 | `D`   | **Delay**         | Ajusta o delay extra em ms antes de cada chamada NVIDIA (0–600000)        |
+| `K`   | **Chave local**   | Define/troca a chave que os clientes enviam para usar o proxy            |
 | `I`   | **Integração**    | Gera snippets prontos para Codex CLI, Claude Code e API direta            |
 
 A persistência de castigos (`penalties.json`) é compartilhada com o desktop —
@@ -161,6 +176,13 @@ npm start -- --headless
 ```
 
 O atalho `npm run start:headless` faz a mesma coisa.
+
+No modo headless você pode definir a chave local exigida dos clientes pela
+variável `AGENTBRIDGE_LOCAL_KEY` (se omitida, usa a padrão de fábrica):
+
+```bash
+export AGENTBRIDGE_LOCAL_KEY="minha-chave-secreta"
+```
 
 O modo headless também é ativado automaticamente quando a saída **não é um
 terminal interativo** — como em pipes (`npm start | tee log.txt`), CI/CD,

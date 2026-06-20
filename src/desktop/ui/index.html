@@ -122,7 +122,7 @@
               <article class="connection-row"><div><span>Chat Completions</span><code id="chatValue"></code></div><button data-copy-target="chatValue">Copiar</button></article>
               <article class="connection-row"><div><span>Responses API</span><code id="responsesValue"></code></div><button data-copy-target="responsesValue">Copiar</button></article>
               <article class="connection-row"><div><span>Anthropic Messages</span><code id="messagesValue"></code></div><button data-copy-target="messagesValue">Copiar</button></article>
-              <article class="connection-row"><div><span>API key local</span><code id="apiKeyValue"></code></div><button data-copy-target="apiKeyValue">Copiar</button></article>
+              <article class="connection-row"><div><span>API key local</span><code id="apiKeyValue"></code></div><div class="connection-actions"><button id="changeKeyButton" type="button">Trocar chave</button><button data-copy-target="apiKeyValue">Copiar</button></div></article>
             </div>
           </div>
           <section class="usage-terminal" aria-labelledby="usageTerminalTitle">
@@ -154,6 +154,20 @@
         <input id="passwordInput" type="password" autocomplete="off" autofocus />
         <div id="unlockError" class="form-error"></div>
         <button class="button primary wide" type="submit">Desbloquear AgentBridge</button>
+      </form>
+    </div>
+
+    <div id="localKeyModal" class="modal-backdrop hidden">
+      <form id="localKeyForm" class="modal-card compact">
+        <div class="modal-heading">
+          <div><span class="kicker">CHAVE LOCAL</span><h2>Definir chave do gateway</h2></div>
+          <button id="closeLocalKeyButton" class="close-button" type="button">Fechar</button>
+        </div>
+        <p id="localKeyHint">Esta e a chave que o Codex, o Claude Code e seus clientes precisam enviar para usar o proxy. Defina a sua para nao depender da padrao.</p>
+        <label class="field-label" for="localKeyInput">Chave local</label>
+        <input id="localKeyInput" type="text" autocomplete="off" spellcheck="false" placeholder="ex.: minha-chave-secreta" />
+        <div id="localKeyError" class="form-error"></div>
+        <button class="button primary wide" type="submit">Salvar chave local</button>
       </form>
     </div>
 

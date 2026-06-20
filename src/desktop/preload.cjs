@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('agentBridge', {
   getStatus: () => ipcRenderer.invoke('status:get'),
   unlock: (password) => ipcRenderer.invoke('vault:unlock', password),
   saveConfig: (config) => ipcRenderer.invoke('config:save', config),
+  saveLocalKey: (value) => ipcRenderer.invoke('localKey:save', value),
   startProxy: () => ipcRenderer.invoke('proxy:start'),
   stopProxy: () => ipcRenderer.invoke('proxy:stop'),
   savePort: (value) => ipcRenderer.invoke('port:save', value),

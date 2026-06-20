@@ -6,7 +6,6 @@ import {
   DEFAULT_MODEL_CATALOG,
   DEFAULT_PORT,
   FIXED_CLIENT_MODEL,
-  INTERNAL_API_KEY,
   NVIDIA_RPM_LIMIT,
   RATE_LIMIT_WINDOW_MS
 } from './config.ts';
@@ -15,6 +14,7 @@ import { withLocalToolInstructions } from './routes/toolInstructions.ts';
 import { forwardToNvidia } from './services/nvidia.ts';
 import {
   getEffectiveModel,
+  getLocalApiKey,
   getModelPriority,
   getRuntimeStatus,
   getSelectedModel,
@@ -40,7 +40,11 @@ app.use('/v1/*', async (context, next) => {
   markClientRequestReceived({ method, path, timestamp: requestStartedAt });
   const bearer = context.req.header('authorization')?.replace(/^Bearer\s+/i, '');
   const apiKey = context.req.header('x-api-key');
-  if (bearer !== INTERNAL_API_KEY && apiKey !== INTERNAL_API_KEY) {
+  // Compara contra a chave local viva (definida pelo usuario, ou a padrao do
+  // config). A mensagem de erro NUNCA revela a chave esperada: so informa que a
+  // autenticacao falhou, para nao expor o segredo a quem chamar sem credencial.
+  const expectedKey = getLocalApiKey();
+  if (bearer !== expectedKey && apiKey !== expectedKey) {
     markClientRequestRejected({
       method,
       path,
@@ -51,7 +55,7 @@ app.use('/v1/*', async (context, next) => {
     return context.json({
       error: {
         type: 'authentication_error',
-        message: `Chave local invalida. Use ${INTERNAL_API_KEY}.`
+        message: 'Falha na autenticacao: chave local invalida ou ausente.'
       }
     }, 401);
   }
@@ -304,9 +308,13 @@ export async function startStandaloneServer() {
     .split(',')
     .map((value) => value.trim())
     .filter(Boolean);
+  // Permite sobrescrever a chave local exigida dos clientes pelo ambiente, sem
+  // precisar do cofre criptografado. Vazio mantem a padrao do config.
+  const localApiKey = (process.env.AGENTBRIDGE_LOCAL_KEY || '').trim();
   setRuntimeConfig({
     apiKeys,
-    port: Number(process.env.PORT) || DEFAULT_PORT
+    port: Number(process.env.PORT) || DEFAULT_PORT,
+    ...(localApiKey ? { localApiKey } : {})
   });
 
   const port = getRuntimeStatus().port;

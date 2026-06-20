@@ -1,6 +1,7 @@
 import {
   DEFAULT_MODEL,
   DEFAULT_PORT,
+  INTERNAL_API_KEY,
   NVIDIA_RPM_LIMIT,
   RATE_LIMIT_PENALTY_MS,
   RATE_LIMIT_WINDOW_MS,
@@ -105,6 +106,11 @@ export const RPM_PACING_INTERVAL_MS = Math.ceil(RATE_LIMIT_WINDOW_MS / NVIDIA_RP
 let apiKeyStates: ApiKeyState[] = [];
 let currentPort = DEFAULT_PORT;
 let requestDelayMs = REQUEST_DELAY_MS;
+// Chave local que os clientes (Codex/Claude/etc.) precisam enviar como Bearer ou
+// x-api-key para falar com o proxy. Comeca na chave padrao do config e pode ser
+// trocada pelo usuario (persistida criptografada junto da config). Nunca e
+// exposta na mensagem de erro de autenticacao.
+let localApiKey = INTERNAL_API_KEY;
 // Modelo NVIDIA para onde TODA chamada e redirecionada. Sempre ativo: o proxy
 // ignora o modelo que o cliente mandou e usa este. Trocar de modelo e a unica
 // forma de "desligar" o anterior. No modo manual e o modelo fixo escolhido pelo
@@ -148,6 +154,7 @@ export function setRuntimeConfig(config: {
   selectedModel?: string;
   autoToggle?: boolean;
   modelPriority?: string[];
+  localApiKey?: string;
 }) {
   const previousStates = new Map(
     apiKeyStates.map((state) => [state.apiKey, state])
@@ -175,6 +182,9 @@ export function setRuntimeConfig(config: {
       .map((model) => String(model || '').trim())
       .filter(Boolean);
   }
+  if (typeof config.localApiKey === 'string' && config.localApiKey.trim()) {
+    localApiKey = config.localApiKey.trim();
+  }
   cursor = 0;
 }
 
@@ -187,6 +197,20 @@ export function clearRuntimeConfig() {
   autoToggle = false;
   modelPriority = [];
   activeModel = DEFAULT_MODEL;
+  localApiKey = INTERNAL_API_KEY;
+}
+
+// Chave local exigida dos clientes. Sempre devolve algo nao vazio (cai para a
+// chave padrao do config quando nada foi definido).
+export function getLocalApiKey() {
+  return localApiKey && localApiKey.trim() ? localApiKey.trim() : INTERNAL_API_KEY;
+}
+
+// Define a chave local que o proxy passa a exigir. Vazio volta para a padrao.
+export function setLocalApiKey(key: unknown) {
+  const normalized = String(key || '').trim();
+  localApiKey = normalized || INTERNAL_API_KEY;
+  return localApiKey;
 }
 
 // Liga/desliga a alternancia automatica de modelo.

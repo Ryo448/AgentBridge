@@ -19,6 +19,7 @@ import {
 } from '../config.ts';
 import {
   configExists,
+  localKeyStored,
   saveConfig,
   unlockConfig,
   type UnlockedConfig
@@ -95,8 +96,17 @@ function freshConfig(): UnlockedConfig {
     selectedModel: DEFAULT_MODEL,
     autoToggle: DEFAULT_AUTO_TOGGLE,
     modelPriority: [...DEFAULT_MODEL_PRIORITY],
-    modelCatalog: DEFAULT_MODEL_CATALOG.map((item) => ({ ...item }))
+    modelCatalog: DEFAULT_MODEL_CATALOG.map((item) => ({ ...item })),
+    localApiKey: INTERNAL_API_KEY
   };
+}
+
+// Chave local viva exibida nos snippets de integracao (a definida pelo usuario ou
+// a padrao do config).
+function localKey(): string {
+  return (unlockedConfig.localApiKey && unlockedConfig.localApiKey.trim())
+    ? unlockedConfig.localApiKey.trim()
+    : INTERNAL_API_KEY;
 }
 
 function refreshRuntime(): void {
@@ -355,6 +365,7 @@ function hotkeyBar(penaltyCount: number): string {
     castigo,
     key('P', 'porta'),
     key('D', 'delay'),
+    key('K', 'chave'),
     key('I', 'integracao'),
     key('L', 'limpar'),
     key('Q', 'sair')
@@ -380,7 +391,7 @@ async function dashboardLoop(): Promise<void> {
         const key = (keyEvent.str || '').toLowerCase();
         const map: Record<string, string> = {
           s: 'toggle', a: 'apis', m: 'models', c: 'penalties',
-          p: 'port', d: 'delay', i: 'integration', l: 'clear', q: 'quit'
+          p: 'port', d: 'delay', k: 'localkey', i: 'integration', l: 'clear', q: 'quit'
         };
         const resolved = map[key];
         if (!resolved) return;
@@ -415,6 +426,7 @@ async function handleAction(action: string): Promise<void> {
       case 'penalties': await penaltiesScreen(); break;
       case 'port': await portScreen(); break;
       case 'delay': await delayScreen(); break;
+      case 'localkey': await localKeyScreen(); break;
       case 'integration': await integrationScreen(); break;
       case 'clear': usageLog = []; break;
     }
@@ -837,6 +849,37 @@ async function delayScreen(): Promise<void> {
 }
 
 // ----------------------------------------------------------------------------
+// Tela: Chave local (a que os clientes enviam para usar o proxy).
+// ----------------------------------------------------------------------------
+async function localKeyScreen(firstTime = false): Promise<void> {
+  const subtitle = firstTime
+    ? 'Defina a chave que o Codex/Claude vao enviar. Sem ela, usa-se a padrao.'
+    : 'Trocar a chave que os clientes enviam (Bearer / x-api-key).';
+  const value = await promptText({
+    header: sectionHeader('Chave local', subtitle),
+    label: 'Chave local',
+    initial: firstTime ? '' : localKey(),
+    placeholder: 'ex.: minha-chave-secreta',
+    validate: (v) => {
+      const key = v.trim();
+      if (key.length < 4) return 'Use ao menos 4 caracteres.';
+      if (/\s/.test(key)) return 'A chave nao pode conter espacos.';
+      return null;
+    }
+  });
+  if (value === null) return;
+  unlockedConfig.localApiKey = value.trim();
+  refreshRuntime();
+  persistToDisk();
+  await pause({
+    lines: sectionHeader('Chave local salva', '').concat(
+      '  ' + c.green('A nova chave ja vale para os clientes.'),
+      '  ' + c.faint('Atualize a variavel de ambiente do Codex/Claude com ela.')
+    )
+  });
+}
+
+// ----------------------------------------------------------------------------
 // Tela: Integracao (snippets Codex / Claude / API direta).
 // ----------------------------------------------------------------------------
 async function integrationScreen(): Promise<void> {
@@ -888,9 +931,9 @@ async function codexScreen(): Promise<void> {
     if (choice === 'toml') {
       await copyAndShow('Codex · config.toml', 'Cole no ~/.codex/config.toml', codexConfigToml(baseUrl()));
     } else if (choice === 'bash') {
-      await copyAndShow('Codex · variavel (bash / zsh)', 'Cole no terminal antes de rodar o Codex', codexEnv(INTERNAL_API_KEY, 'bash'));
+      await copyAndShow('Codex · variavel (bash / zsh)', 'Cole no terminal antes de rodar o Codex', codexEnv(localKey(), 'bash'));
     } else if (choice === 'pwsh') {
-      await copyAndShow('Codex · variavel (PowerShell)', 'Cole no PowerShell antes de rodar o Codex', codexEnv(INTERNAL_API_KEY, 'powershell'));
+      await copyAndShow('Codex · variavel (PowerShell)', 'Cole no PowerShell antes de rodar o Codex', codexEnv(localKey(), 'powershell'));
     }
   }
 }
@@ -907,9 +950,9 @@ async function claudeScreen(): Promise<void> {
     });
     if (!choice || choice === 'back') return;
     if (choice === 'bash') {
-      await copyAndShow('Claude Code · bash / zsh', 'Cole no terminal', claudeSnippet(baseUrl(), INTERNAL_API_KEY, 'bash'));
+      await copyAndShow('Claude Code · bash / zsh', 'Cole no terminal', claudeSnippet(baseUrl(), localKey(), 'bash'));
     } else if (choice === 'pwsh') {
-      await copyAndShow('Claude Code · PowerShell', 'Cole no PowerShell', claudeSnippet(baseUrl(), INTERNAL_API_KEY, 'powershell'));
+      await copyAndShow('Claude Code · PowerShell', 'Cole no PowerShell', claudeSnippet(baseUrl(), localKey(), 'powershell'));
     }
   }
 }
@@ -917,7 +960,7 @@ async function claudeScreen(): Promise<void> {
 async function apiDirectScreen(): Promise<void> {
   while (true) {
     const entries = [
-      { label: 'Chave local', value: 'key', text: INTERNAL_API_KEY },
+      { label: 'Chave local', value: 'key', text: localKey() },
       { label: 'Chat Completions', value: 'chat', text: `${baseUrl()}/v1/chat/completions` },
       { label: 'Responses', value: 'responses', text: `${baseUrl()}/v1/responses` },
       { label: 'Anthropic Messages', value: 'messages', text: `${baseUrl()}/v1/messages` },
@@ -941,21 +984,21 @@ async function exportIntegrationFile(): Promise<void> {
   const file = path.join(appDir(), 'integracao.txt');
   const content = [
     `AgentBridge NVIDIA - integracao (${baseUrl()})`,
-    `Chave local: ${INTERNAL_API_KEY}`,
+    `Chave local: ${localKey()}`,
     '',
     '=== Codex CLI (~/.codex/config.toml) ===',
     codexConfigToml(baseUrl()),
     '',
     '# bash / zsh',
-    codexEnv(INTERNAL_API_KEY, 'bash'),
+    codexEnv(localKey(), 'bash'),
     '# PowerShell',
-    codexEnv(INTERNAL_API_KEY, 'powershell'),
+    codexEnv(localKey(), 'powershell'),
     '',
     '=== Claude Code (bash / zsh) ===',
-    claudeSnippet(baseUrl(), INTERNAL_API_KEY, 'bash'),
+    claudeSnippet(baseUrl(), localKey(), 'bash'),
     '',
     '=== Claude Code (PowerShell) ===',
-    claudeSnippet(baseUrl(), INTERNAL_API_KEY, 'powershell'),
+    claudeSnippet(baseUrl(), localKey(), 'powershell'),
     '',
     '=== Endpoints ===',
     `${baseUrl()}/v1/chat/completions`,
@@ -1002,6 +1045,9 @@ async function unlockFlow(): Promise<boolean> {
         proxyState = 'stopped';
         // Sobe o gateway automaticamente, igual ao desktop.
         if (unlockedConfig.apiKeys.length) await startProxy();
+        // So pede a chave local quando o config ainda nao guarda uma (config
+        // antigo). Depois disso, a tecla K troca quando quiser.
+        if (!localKeyStored(configPath())) await localKeyScreen(true);
         return true;
       } catch (e) {
         error = e instanceof Error ? e.message : 'Senha incorreta.';
@@ -1040,6 +1086,8 @@ async function unlockFlow(): Promise<boolean> {
     unlockedConfig = freshConfig();
     clearRuntimeConfig();
     proxyState = 'stopped';
+    // Cofre novo: define a chave local antes de cadastrar as APIs.
+    await localKeyScreen(true);
     // Cadastro inicial das APIs.
     await apisScreen();
     if (unlockedConfig.apiKeys.length) {

@@ -102,6 +102,10 @@ pre { min-height: 170px; margin: 0; padding: 16px 92px 16px 16px; overflow: auto
 .connection-row span { margin-bottom: 5px; color: var(--muted); font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .connection-row code { overflow-wrap: anywhere; color: #d8dce5; font: 11px/1.4 "Cascadia Code",Consolas,monospace; }
 .connection-row button { height: 32px; border-color: var(--line); background: var(--panel-strong); color: var(--muted); font-size: 9px; font-weight: 700; }
+.connection-row:has(.connection-actions) { grid-template-columns: minmax(0,1fr) 96px; }
+.connection-actions { display: flex; flex-direction: column; gap: 6px; }
+.connection-actions button { width: 100%; }
+#changeKeyButton { border-color: var(--accent, #76b900); color: #d8dce5; }
 .usage-terminal { margin: 0 22px 22px; overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: #080a0e; }
 .terminal-header, .terminal-header > div, .terminal-line { display: flex; align-items: center; }
 .terminal-header { justify-content: space-between; min-height: 38px; padding: 0 13px; border-bottom: 1px solid var(--line-soft); background: #0d1016; }
