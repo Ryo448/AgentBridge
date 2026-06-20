@@ -243,6 +243,20 @@ export function resolveAvailableModel(exhausted: string[] = [], timestamp = Date
   return pickAvailableModel(exhausted, timestamp);
 }
 
+// Este modelo especifico tem PELO MENOS uma chave fora de castigo (429) agora?
+// Usado pelas rotas diretas (/v1/direct/*) e por GET /v1/models/available para
+// dizer ao cliente quais modelos estao realmente prontos para receber request.
+// Independe do modelo selecionado no app: o castigo e checado por (chave, modelo).
+export function isModelAvailable(model: string, timestamp = Date.now()): boolean {
+  if (!apiKeyStates.length) return false;
+  const id = String(model || '').trim();
+  if (!id) return false;
+  return apiKeyStates.some((state) => {
+    resetExpiredWindow(state, timestamp);
+    return !isResting(state, timestamp, id);
+  });
+}
+
 // Modelo efetivo de uma request. No modo manual, sempre o modelo fixo. No modo
 // automatico, reavalia a lista de prioridades DO TOPO a cada chamada (por isso o
 // proxy volta sozinho para o modelo de maior prioridade assim que ele libera uma

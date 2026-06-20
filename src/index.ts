@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { fileURLToPath } from 'node:url';
 import {
+  DEFAULT_MODEL_CATALOG,
   DEFAULT_PORT,
   FIXED_CLIENT_MODEL,
   INTERNAL_API_KEY,
@@ -14,9 +15,11 @@ import { withLocalToolInstructions } from './routes/toolInstructions.ts';
 import { forwardToNvidia } from './services/nvidia.ts';
 import {
   getEffectiveModel,
+  getModelPriority,
   getRuntimeStatus,
   getSelectedModel,
   isAutoToggleEnabled,
+  isModelAvailable,
   markClientRequestCompleted,
   markClientRequestFailed,
   markClientRequestReceived,
@@ -88,6 +91,42 @@ async function invokeChat(body: Record<string, unknown>) {
   return forwardToNvidia(withLocalToolInstructions(overridden), fetch, undefined, {}, { resolveModel });
 }
 
+// Catalogo "real" de modelos que o gateway conhece: a uniao da lista de
+// prioridades viva (editada pelo usuario no app) com o catalogo padrao do config.
+// Mantem a ordem (prioridade primeiro) e remove duplicatas.
+function listKnownModels(): string[] {
+  const ids = [
+    ...getModelPriority(),
+    ...DEFAULT_MODEL_CATALOG.map((entry) => entry.model)
+  ]
+    .map((id) => String(id || '').trim())
+    .filter(Boolean);
+  return [...new Set(ids)];
+}
+
+// Mapa label/icone do catalogo padrao, so para enriquecer a listagem.
+const CATALOG_META = new Map(
+  DEFAULT_MODEL_CATALOG.map((entry) => [entry.model, entry])
+);
+
+// Diferente de invokeChat: NAO reescreve o modelo. Honra exatamente o `model`
+// que o cliente mandou (passthrough direto), sem failover automatico e sem
+// depender do modelo selecionado no app. O castigo de 429 continua sendo
+// rastreado por modelo dentro do forwardToNvidia (deriva de body.model).
+async function invokeChatDirect(body: Record<string, unknown>) {
+  const requested = String(body.model || '').trim();
+  if (!requested || requested === FIXED_CLIENT_MODEL) {
+    const err: any = new Error(
+      `Informe um "model" real (ex.: ${DEFAULT_MODEL_CATALOG[0]?.model}). ` +
+      `Consulte GET /v1/models/available para a lista. Nao use "${FIXED_CLIENT_MODEL}" aqui.`
+    );
+    err.status = 400;
+    throw err;
+  }
+  const overridden = { ...body, model: requested };
+  return forwardToNvidia(withLocalToolInstructions(overridden), fetch, undefined, {}, {});
+}
+
 app.get('/health', (context) => {
   const runtime = getRuntimeStatus();
   return context.json({
@@ -129,6 +168,59 @@ app.post('/v1/chat/completions', async (context) => {
 });
 app.post('/v1/responses', (context) => responsesApi(context, invokeChat));
 app.post('/v1/messages', (context) => anthropicMessagesApi(context, invokeChat));
+
+// ---------------------------------------------------------------------------
+// Rotas DIRETAS (isoladas). Nao alteram o comportamento das rotas acima: aqui o
+// cliente escolhe o modelo por request, sem precisar selecionar nada no app.
+// ---------------------------------------------------------------------------
+
+// Lista os modelos REAIS que o gateway conhece, cada um com `available`: true
+// quando ha pelo menos uma chave fora de castigo (429) para ele agora. Formato
+// compativel com OpenAI (data[].id = id real "provider/modelo"), entao um client
+// OpenAI consegue popular o seletor de modelos direto daqui. Use ?only_available=1
+// para receber so os que estao prontos agora.
+app.get('/v1/models/available', (context) => {
+  const created = Math.floor(Date.now() / 1000);
+  const onlyAvailable = ['1', 'true', 'yes'].includes(
+    (context.req.query('only_available') || '').toLowerCase()
+  );
+  const data = listKnownModels()
+    .map((id) => {
+      const meta = CATALOG_META.get(id);
+      return {
+        id,
+        object: 'model' as const,
+        created,
+        owned_by: 'nvidia',
+        available: isModelAvailable(id),
+        ...(meta ? { label: meta.label, icon: meta.icon } : {})
+      };
+    })
+    .filter((entry) => (onlyAvailable ? entry.available : true));
+  return context.json({
+    object: 'list',
+    data,
+    model_source: 'catalog',
+    selected_model: getSelectedModel(),
+    message: 'Envie o id real em POST /v1/direct/chat/completions (ou /v1/direct/responses, /v1/direct/messages) para ir direto a esse modelo.'
+  });
+});
+
+// Chat Completions DIRETO: usa o `model` do corpo como esta, sem redirecionar.
+app.post('/v1/direct/chat/completions', async (context) => {
+  try {
+    return await invokeChatDirect(await context.req.json<Record<string, unknown>>());
+  } catch (error: any) {
+    return context.json(
+      { error: { type: 'proxy_error', message: error.message } },
+      error?.status === 400 ? 400 : 503
+    );
+  }
+});
+// Responses e Anthropic Messages DIRETOS: mesma traducao de protocolo das rotas
+// originais, mas passando o invocador que honra o modelo do corpo.
+app.post('/v1/direct/responses', (context) => responsesApi(context, invokeChatDirect));
+app.post('/v1/direct/messages', (context) => anthropicMessagesApi(context, invokeChatDirect));
 
 function formatStandaloneLog(event: ApiRequestLogEvent) {
   const time = new Date(event.timestamp).toLocaleTimeString('pt-BR');

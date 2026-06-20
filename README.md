@@ -43,6 +43,33 @@ As requisições são distribuídas automáticamente por chave para respeitar 35
 Cada chave aceita no máximo 35 reservas por minuto. Quando todas atingem o
 limite, novas requisições aguardam a virada do minuto antes de continuar.
 
+## Rotas diretas (escolher o modelo por request)
+
+As rotas acima **sempre** redirecionam para o modelo selecionado no app. Quando
+você quer escolher o modelo direto no client, sem mexer na seleção global, use as
+rotas **diretas** (mesma autenticação `EuAmoORyo`):
+
+- Listar modelos reais disponíveis: `GET http://localhost:3000/v1/models/available`
+  - Formato OpenAI (`data[].id` = id real `provider/modelo`), com `available: true/false`.
+  - `?only_available=1` retorna só os que têm chave livre agora.
+- Chat Completions direto: `POST http://localhost:3000/v1/direct/chat/completions`
+- Responses direto: `POST http://localhost:3000/v1/direct/responses`
+- Anthropic Messages direto: `POST http://localhost:3000/v1/direct/messages`
+
+Nas rotas diretas o campo `model` do corpo é honrado **como está** (sem
+redirecionamento e sem failover automático). Informe um id real do catálogo — não
+use `AgentBridge` aqui. Exemplo:
+
+```bash
+curl http://localhost:3000/v1/direct/chat/completions \
+  -H "Authorization: Bearer EuAmoORyo" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"moonshotai/kimi-k2.6","messages":[{"role":"user","content":"oi"}]}'
+```
+
+O rodízio de chaves e o castigo de 429 (por modelo) continuam valendo. As rotas
+originais (`/v1/models`, `/v1/chat/completions`, etc.) seguem inalteradas.
+
 ## Modo terminal
 
 O **AgentBridge** agora tem suporte nativo para terminal — com ou sem interface
