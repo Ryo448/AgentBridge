@@ -75,17 +75,26 @@ app.use('/v1/*', async (context, next) => {
 });
 
 async function invokeChat(body: Record<string, unknown>) {
-  // Redirecionamento SEMPRE ativo: o proxy ignora o modelo que o cliente mandou
-  // (seja "AgentBridge", "gpt-5", deepseek, vazio, o que for) e reescreve para o
-  // modelo efetivo. No modo manual e o modelo fixo selecionado; no modo automatico
-  // e o primeiro modelo disponivel da lista de prioridades (reavaliada a cada
-  // request, entao o proxy volta sozinho para o de maior prioridade quando ele
-  // libera). Assim o usuario nunca precisa mexer no modelo do Codex/Claude.
-  const overridden = { ...body, model: getEffectiveModel() };
-  // No modo automatico, passa o resolvedor de failover de modelo: se todas as
-  // chaves do modelo atual estiverem de castigo (429), o proxy troca para o
-  // proximo da lista em vez de devolver erro ao cliente.
-  const resolveModel = isAutoToggleEnabled()
+  // Roteamento de modelo (vale para /v1/chat/completions, /v1/responses e
+  // /v1/messages):
+  //   - model "AgentBridge" ou vazio -> REDIRECIONA para o modelo efetivo (modo
+  //     manual: o selecionado no app; modo automatico: o primeiro disponivel da
+  //     prioridade). E o comportamento de sempre, entao Codex e Claude (que mandam
+  //     "AgentBridge") nao mudam em nada.
+  //   - model com id real (ex.: o Odysseus escolheu "moonshotai/kimi-k2.6") ->
+  //     HONRA o pedido quando ha pelo menos uma chave livre para ele. Se nao
+  //     houver, cai para o modelo efetivo em vez de devolver erro.
+  const requested = String(body.model ?? '').trim();
+  const isPassthrough = requested !== '' && requested !== FIXED_CLIENT_MODEL;
+  const target = isPassthrough && isModelAvailable(requested)
+    ? requested
+    : getEffectiveModel();
+  const overridden = { ...body, model: target };
+  // Failover de modelo: se TODAS as chaves do alvo entrarem em castigo (429) no
+  // meio da request, o proxy troca para o proximo modelo disponivel da lista em
+  // vez de erro. Sempre ativo quando o client pediu um modelo real; no modo
+  // "AgentBridge" segue a regra antiga (so com alternancia automatica ligada).
+  const resolveModel = isPassthrough || isAutoToggleEnabled()
     ? (exhausted: string[]) => resolveAvailableModel(exhausted)
     : undefined;
   return forwardToNvidia(withLocalToolInstructions(overridden), fetch, undefined, {}, { resolveModel });
@@ -144,18 +153,40 @@ app.get('/health', (context) => {
 });
 
 app.get('/v1/models', (context) => {
-  // Anuncia o modelo fixo "AgentBridge": o cliente pode selecionar ele sem
-  // precisar saber o id real da NVIDIA. O proxy redireciona para o modelo
-  // escolhido no app de qualquer jeito.
+  // Lista o catalogo REAL de modelos (ids "provider/modelo"), com flag available
+  // por modelo, MAIS o pseudo-modelo "AgentBridge" (que mantem o redirecionamento
+  // automatico para o modelo selecionado no app). Assim clients OpenAI-compativeis
+  // (Odysseus, etc.) populam o seletor com os modelos de verdade e ainda podem
+  // escolher "AgentBridge" para usar o modo automatico.
   const created = Math.floor(Date.now() / 1000);
+  const real = listKnownModels().map((id) => {
+    const meta = CATALOG_META.get(id);
+    return {
+      id,
+      object: 'model' as const,
+      created,
+      owned_by: 'nvidia',
+      available: isModelAvailable(id),
+      ...(meta ? { label: meta.label, icon: meta.icon } : {})
+    };
+  });
   return context.json({
     object: 'list',
     data: [
-      { id: FIXED_CLIENT_MODEL, object: 'model', created, owned_by: 'agentbridge' }
+      ...real,
+      {
+        id: FIXED_CLIENT_MODEL,
+        object: 'model',
+        created,
+        owned_by: 'agentbridge',
+        available: true,
+        label: 'AgentBridge (auto)',
+        icon: ''
+      }
     ],
     model_source: 'proxy',
     selected_model: getSelectedModel(),
-    message: `Use o modelo "${FIXED_CLIENT_MODEL}". O proxy redireciona para o modelo selecionado no app.`
+    message: `Escolha um id real para ir direto a ele, ou "${FIXED_CLIENT_MODEL}" para usar o modelo selecionado no app.`
   });
 });
 

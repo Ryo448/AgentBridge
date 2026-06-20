@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { app } from '../index.ts';
-import { INTERNAL_API_KEY } from '../config.ts';
+import { FIXED_CLIENT_MODEL, INTERNAL_API_KEY } from '../config.ts';
 import { setRuntimeConfig } from '../services/runtime.ts';
 import {
   LOCAL_TOOL_EDIT_POLICY_MARKER,
@@ -37,8 +37,8 @@ test('local endpoints require EuAmoORyo', async () => {
 
 test('Responses and Anthropic adapters return protocol-native payloads', async () => {
   const originalFetch = globalThis.fetch;
-  // Redirecionamento sempre ativo: nao importa o modelo que o cliente mandar,
-  // o upstream recebe o modelo selecionado no proxy.
+  // Com model "AgentBridge", o redirecionamento continua ativo: nao importa o
+  // protocolo, o upstream recebe o modelo selecionado no proxy.
   setRuntimeConfig({ apiKeys: ['nvapi-one', 'nvapi-two'], selectedModel: 'forced/selected-model' });
   const receivedModels: string[] = [];
   globalThis.fetch = async (_input, init) => {
@@ -62,7 +62,7 @@ test('Responses and Anthropic adapters return protocol-native payloads', async (
         method: 'POST',
         headers,
         body: JSON.stringify({
-          model: 'publisher/codex-model',
+          model: FIXED_CLIENT_MODEL,
           input: 'Teste Codex'
         })
       }),
@@ -70,7 +70,7 @@ test('Responses and Anthropic adapters return protocol-native payloads', async (
         method: 'POST',
         headers: { ...headers, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({
-          model: 'publisher/claude-model',
+          model: FIXED_CLIENT_MODEL,
           max_tokens: 256,
           messages: [{ role: 'user', content: 'Teste Claude' }]
         })
@@ -195,4 +195,59 @@ test('chat completions redireciona requests sem modelo para o modelo selecionado
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+
+test('chat completions honra modelo real disponivel e cai para o efetivo quando "AgentBridge"', async () => {
+  const originalFetch = globalThis.fetch;
+  // Nova regra: id real com chave livre e honrado; "AgentBridge" redireciona para
+  // o modelo selecionado. Nunca devolve erro de modelo.
+  setRuntimeConfig({ apiKeys: ['nvapi-passthrough'], selectedModel: 'forced/selected-model' });
+  const receivedModels: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    const request = JSON.parse(String(init?.body || '{}'));
+    receivedModels.push(request.model);
+    return new Response('data: [DONE]\n\n', {
+      headers: { 'content-type': 'text/event-stream' }
+    });
+  };
+
+  try {
+    const headers = {
+      'content-type': 'application/json',
+      authorization: `Bearer ${INTERNAL_API_KEY}`
+    };
+    await app.request('/v1/chat/completions', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: 'moonshotai/kimi-k2.6',
+        messages: [{ role: 'user', content: 'oi' }]
+      })
+    });
+    await app.request('/v1/chat/completions', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: FIXED_CLIENT_MODEL,
+        messages: [{ role: 'user', content: 'oi' }]
+      })
+    });
+
+    assert.deepEqual(receivedModels, ['moonshotai/kimi-k2.6', 'forced/selected-model']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('GET /v1/models lista os modelos reais e o pseudo-modelo AgentBridge', async () => {
+  setRuntimeConfig({ apiKeys: ['nvapi-list'] });
+  const res = await app.request('/v1/models', {
+    headers: { authorization: `Bearer ${INTERNAL_API_KEY}` }
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  const ids = body.data.map((m: any) => m.id);
+  assert.ok(ids.includes('moonshotai/kimi-k2.6'), 'deve listar um modelo real');
+  assert.ok(ids.includes(FIXED_CLIENT_MODEL), 'deve manter o AgentBridge');
 });

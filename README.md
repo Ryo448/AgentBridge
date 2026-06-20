@@ -43,32 +43,44 @@ As requisições são distribuídas automáticamente por chave para respeitar 35
 Cada chave aceita no máximo 35 reservas por minuto. Quando todas atingem o
 limite, novas requisições aguardam a virada do minuto antes de continuar.
 
-## Rotas diretas (escolher o modelo por request)
+## Escolha de modelo pelo client
 
-As rotas acima **sempre** redirecionam para o modelo selecionado no app. Quando
-você quer escolher o modelo direto no client, sem mexer na seleção global, use as
-rotas **diretas** (mesma autenticação `EuAmoORyo`):
+Os endpoints **padrão** entendem o modelo que o client manda — é assim que um
+workspace OpenAI-compatível (Open WebUI, Odysseus, etc.) lista e escolhe modelos
+sozinho:
 
-- Listar modelos reais disponíveis: `GET http://localhost:3000/v1/models/available`
-  - Formato OpenAI (`data[].id` = id real `provider/modelo`), com `available: true/false`.
-  - `?only_available=1` retorna só os que têm chave livre agora.
-- Chat Completions direto: `POST http://localhost:3000/v1/direct/chat/completions`
-- Responses direto: `POST http://localhost:3000/v1/direct/responses`
-- Anthropic Messages direto: `POST http://localhost:3000/v1/direct/messages`
+- `GET /v1/models` lista o **catálogo real** de modelos (ids `provider/modelo`,
+  cada um com `available: true/false`) **mais** o pseudo-modelo `AgentBridge`.
+  Assim o seletor do client é populado com os modelos de verdade.
+- `POST /v1/chat/completions` (e também `/v1/responses` e `/v1/messages`) roteia
+  conforme o `model` recebido:
+  - `model: "AgentBridge"` (ou vazio) → **redireciona** para o modelo selecionado
+    no app (modo automático continua valendo). É o que o Codex/Claude usam, então
+    nada muda para eles.
+  - `model: "<id real>"` → vai **direto** para esse modelo, desde que haja chave
+    livre. Se não houver, cai para o modelo efetivo em vez de devolver erro — ou
+    seja, nunca quebra a request por causa de modelo.
 
-Nas rotas diretas o campo `model` do corpo é honrado **como está** (sem
-redirecionamento e sem failover automático). Informe um id real do catálogo — não
-use `AgentBridge` aqui. Exemplo:
+Exemplo escolhendo um modelo específico:
 
 ```bash
-curl http://localhost:3000/v1/direct/chat/completions \
+curl http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer EuAmoORyo" \
   -H "Content-Type: application/json" \
   -d '{"model":"moonshotai/kimi-k2.6","messages":[{"role":"user","content":"oi"}]}'
 ```
 
-O rodízio de chaves e o castigo de 429 (por modelo) continuam valendo. As rotas
-originais (`/v1/models`, `/v1/chat/completions`, etc.) seguem inalteradas.
+### Rotas extras (atalhos para scripts)
+
+Além dos endpoints padrão, existem rotas dedicadas equivalentes:
+
+- `GET /v1/models/available` — mesma listagem do catálogo; aceita
+  `?only_available=1` para retornar só os modelos com chave livre agora.
+- `POST /v1/direct/chat/completions` · `/v1/direct/responses` ·
+  `/v1/direct/messages` — passthrough **estrito**: sempre honram o `model` do
+  corpo e exigem um id real (retornam 400 se vier vazio ou `AgentBridge`).
+
+O rodízio de chaves e o castigo de 429 (por modelo) valem em todas as rotas.
 
 ## Modo terminal
 
