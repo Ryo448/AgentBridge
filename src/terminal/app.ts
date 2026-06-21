@@ -782,11 +782,11 @@ async function penaltiesScreen(): Promise<void> {
       } else {
         bodyLines = parsed.map((item) => {
           const title = item.model ? `API ${item.apiNumber} · ${item.model}` : `API ${item.apiNumber}`;
-          const countdown = c.amber(formatCountdown(item.penaltyUntil - now));
-          const success = c.green(`${item.successesBefore429 || 0} x 200 ate 429`);
-          const entered = c.faint(`entrou ${new Date(item.penaltyStartedAt).toLocaleTimeString('pt-BR')}`);
-          const left = padEndVisible(c.text(title), Math.max(20, w - 34));
-          return `${left} ${success}  ${entered}  ${countdown}`;
+          const remaining = item.penaltyUntil - now;
+          const countdown = remaining > 0 ? c.amber(formatCountdown(remaining)) : c.green('00:00');
+          const requests = c.faint(`${item.successesBefore429 || 0} requests`);
+          const left = padEndVisible(c.text(title), Math.max(16, w - 22));
+          return `${left} ${requests}  ${countdown}`;
         });
       }
       drawFrame(header.concat(
