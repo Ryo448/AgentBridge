@@ -29,7 +29,9 @@ const previewStatus = {
   messagesEndpoint: 'http://localhost:3000/v1/messages',
   chatEndpoint: 'http://localhost:3000/v1/chat/completions',
   configPath: 'Documentos\\AgentBridge\\config.json',
-  penaltyPath: 'Documentos\\AgentBridge\\penalties.json'
+  penaltyPath: 'Documentos\\AgentBridge\\penalties.json',
+  locale: 'pt-BR',
+  i18n: {}
 };
 const bridge = window.agentBridge || {
   getStatus: async () => previewStatus,
@@ -41,16 +43,33 @@ const bridge = window.agentBridge || {
   savePort: async () => previewStatus,
   saveDelay: async () => previewStatus,
   selectModel: async (model) => ({ ...previewStatus, selectedModel: model }),
-  testModel: async () => ({ ok: false, error: 'Indisponivel no modo de previa.' }),
+  testModel: async () => ({ ok: false, error: 'Unavailable in preview mode.' }),
   setAutoToggle: async (value) => ({ ...previewStatus, autoToggle: Boolean(value) }),
   updateModels: async (payload) => ({
     ...previewStatus,
     modelCatalog: (payload && payload.catalog) || previewStatus.modelCatalog,
     modelPriority: (payload && payload.priority) || previewStatus.modelPriority
   }),
+  setLocale: async (locale) => {
+    previewStatus.locale = locale;
+    return previewStatus;
+  },
   copy: async () => true,
   onStatus: () => () => {}
 };
+
+// Helper: traduz usando o dicionario injetado no status.
+// O fallback e a chave crua (para preview/bridge simulado).
+function t(key, replacements) {
+  const map = (lastStatus && lastStatus.i18n) || {};
+  let value = map[key] || key;
+  if (replacements) {
+    Object.keys(replacements).forEach((k) => {
+      value = value.replace('{' + k + '}', String(replacements[k]));
+    });
+  }
+  return value;
+}
 const byId = (id) => document.getElementById(id);
 const modelIcons = window.agentBridgeModelIcons;
 let lastStatus = previewStatus;
@@ -69,11 +88,13 @@ const elements = Object.fromEntries([
   'copyLogButton',
   'selectedModelLabel', 'selectModelButton', 'selectModal', 'closeSelectButton', 'modelGrid',
   'autoToggleSwitch', 'autoToggleHint', 'selectModeHint', 'addModelButton', 'addModelForm',
-  'addModelName', 'addModelId', 'addModelError', 'cancelAddModelButton'
+  'addModelName', 'addModelId', 'addModelError', 'cancelAddModelButton',
+  'localeButton', 'localeModal', 'closeLocaleButton', 'localeList', 'localeSourceHint',
+  'messageText'
 ].map((id) => [id, byId(id)]));
 
 function stateLabel(state) {
-  return ({ locked: 'Bloqueado', starting: 'Iniciando', running: 'Online', stopped: 'Offline', error: 'Erro' })[state] || 'Offline';
+  return t('status.' + state) || ({ locked: 'Bloqueado', starting: 'Iniciando', running: 'Online', stopped: 'Offline', error: 'Erro' })[state] || 'Offline';
 }
 
 function codexSnippet(status) {
@@ -114,19 +135,19 @@ function formatElapsed(milliseconds) {
 
 function usageMessage(entry) {
   const target = entry.path ? `${entry.method || ''} ${entry.path}`.trim() : '';
-  if (entry.type === 'received') return `Cliente chamou ${target}`;
-  if (entry.type === 'rejected') return `Cliente rejeitado ${target} HTTP ${entry.status}: ${entry.message || 'chave invalida'}`;
-  if (entry.type === 'completed_client') return `Cliente recebeu HTTP ${entry.status} ${target} em ${formatElapsed(entry.elapsedMs)}`;
-  if (entry.type === 'failed_client') return `Erro no proxy ${target}: ${entry.message || 'falha desconhecida'}`;
-  if (entry.type === 'rate_limit_wait') return `Aguardando throttle de RPM por ${formatElapsed(entry.waitMs)}`;
-  if (entry.type === 'delay') return `Esperando delay de ${formatElapsed(entry.delayMs)}`;
-  if (entry.type === 'started') return `API ${entry.apiNumber} comecou a responder em ${formatElapsed(entry.elapsedMs)}${entry.model ? ` · modelo ${entry.model}` : ''}`;
-  if (entry.type === 'completed') return `API ${entry.apiNumber} Respondeu em ${formatElapsed(entry.elapsedMs)}${Number(entry.totalTokens) > 0 ? `, consumindo ${entry.totalTokens} tokens` : ''}`;
-  if (entry.type === 'upstream_error') return `NVIDIA erro HTTP ${entry.status} na API ${entry.apiNumber}${entry.model ? ` (modelo ${entry.model})` : ''}: ${entry.message || 'sem detalhe'}`;
-  if (entry.type === 'cancelled') return `Stream cancelado na API ${entry.apiNumber}: ${entry.message || 'cliente desconectou'}`;
-  if (entry.type === 'model_switch') return `Modelo trocado automaticamente${entry.message ? ` ${entry.message}` : ''} para ${entry.model || '?'}`;
-  if (entry.type === 'error') return `Erro na API ${entry.apiNumber || '?'}: ${entry.message || 'sem detalhe'}`;
-  return `API ${entry.apiNumber} Chamada`;
+  if (entry.type === 'received') return t('log.clientCalled', { target });
+  if (entry.type === 'rejected') return t('log.clientRejected', { target, status: String(entry.status), message: entry.message || t('log.invalidKey') });
+  if (entry.type === 'completed_client') return t('log.clientReceived', { target, status: String(entry.status), elapsed: formatElapsed(entry.elapsedMs) });
+  if (entry.type === 'failed_client') return t('log.proxyError', { target, message: entry.message || t('log.unknownError') });
+  if (entry.type === 'rate_limit_wait') return t('log.rateLimitWait', { elapsed: formatElapsed(entry.waitMs) });
+  if (entry.type === 'delay') return t('log.delayWait', { elapsed: formatElapsed(entry.delayMs) });
+  if (entry.type === 'started') return t('log.apiStarted', { number: String(entry.apiNumber), elapsed: formatElapsed(entry.elapsedMs), model: entry.model ? t('log.modelPrefix', { model: entry.model }) : '' });
+  if (entry.type === 'completed') return t('log.apiCompleted', { number: String(entry.apiNumber), elapsed: formatElapsed(entry.elapsedMs), tokens: Number(entry.totalTokens) > 0 ? t('log.apiTokens', { count: String(entry.totalTokens) }) : '' });
+  if (entry.type === 'upstream_error') return t('log.upstreamError', { status: String(entry.status), number: String(entry.apiNumber), model: entry.model ? ' (' + entry.model + ')' : '', message: entry.message || t('log.noDetail') });
+  if (entry.type === 'cancelled') return t('log.streamCancelled', { number: String(entry.apiNumber), message: entry.message || t('log.clientDisconnected') });
+  if (entry.type === 'model_switch') return t('log.modelSwitch', { reason: entry.message ? ' ' + entry.message : '', model: entry.model || '?' });
+  if (entry.type === 'error') return t('log.apiError', { number: String(entry.apiNumber || '?'), message: entry.message || t('log.noDetail') });
+  return t('log.apiCall', { number: String(entry.apiNumber) });
 }
 
 function renderUsageTerminal(status) {
@@ -135,7 +156,7 @@ function renderUsageTerminal(status) {
   const usageLog = Array.isArray(status.usageLog) ? status.usageLog : [];
   if (!usageLog.length) {
     elements.usageTerminalOutput.innerHTML =
-      '<div class="terminal-empty">Aguardando a primeira requisicao...</div>';
+      '<div class="terminal-empty">' + t('electron.waitingRequest') + '</div>';
     return;
   }
 
@@ -145,7 +166,8 @@ function renderUsageTerminal(status) {
     line.className = 'terminal-line';
     const time = document.createElement('span');
     time.className = 'terminal-time';
-    time.textContent = new Date(entry.timestamp).toLocaleTimeString('pt-BR');
+    const loc = (lastStatus && lastStatus.locale) || 'en';
+    time.textContent = new Date(entry.timestamp).toLocaleTimeString(loc);
     const message = document.createElement('span');
     message.textContent = usageMessage(entry);
     const count = document.createElement('span');
@@ -208,7 +230,7 @@ function renderPenalties(status) {
   if (!elements.penaltyList) return;
   if (!rows.length) {
     elements.penaltyList.innerHTML =
-      '<div class="terminal-empty">Nenhuma API de castigo agora.</div>';
+      '<div class="terminal-empty">' + t('electron.noPenalty') + '</div>';
     return;
   }
   const now = Date.now();
@@ -226,11 +248,11 @@ function renderPenalties(status) {
       const sub = document.createElement('span');
       sub.className = 'penalty-sub';
       sub.textContent = item.penaltyStartedAt
-        ? `entrou de castigo as ${new Date(item.penaltyStartedAt).toLocaleTimeString('pt-BR')}`
-        : 'em castigo apos HTTP 429';
+        ? t('penalties.enteredAt', { time: new Date(item.penaltyStartedAt).toLocaleTimeString((lastStatus && lastStatus.locale) || 'en') })
+        : t('penalties.after429');
       const successes = document.createElement('span');
       successes.className = 'penalty-successes';
-      successes.textContent = `${item.successesBefore429} resposta${item.successesBefore429 === 1 ? '' : 's'} HTTP 200 ate dar 429`;
+      successes.textContent = t('penalties.requests', { count: String(item.successesBefore429) });
       info.append(title, sub, successes);
       const countdown = document.createElement('span');
       countdown.className = 'penalty-countdown';
@@ -251,7 +273,7 @@ function buildLogText(status) {
   const logs = Array.isArray(status.usageLog) ? status.usageLog : [];
   if (!logs.length) return '';
   return logs.map((entry) => {
-    const time = new Date(entry.timestamp).toLocaleTimeString('pt-BR');
+    const time = new Date(entry.timestamp).toLocaleTimeString((lastStatus && lastStatus.locale) || 'en');
     const count = Number.isFinite(Number(entry.requestsThisMinute))
       ? ` [${entry.requestsThisMinute}/${status.limitPerKey}]`
       : '';
@@ -265,16 +287,29 @@ function renderStatus(status) {
   elements.appVersion.textContent = `v${status.appVersion}`;
   elements.proxyStatus.className = `status-badge ${state}`;
   elements.proxyStatus.querySelector('.status-text').textContent = stateLabel(state);
-  elements.vaultStatus.textContent = status.unlocked ? 'Desbloqueado' : 'Bloqueado';
+  elements.vaultStatus.textContent = status.unlocked ? t('vault.unlocked') : t('vault.locked');
   elements.vaultDetail.textContent = status.unlocked
-    ? `${status.keyCount} API${status.keyCount === 1 ? '' : 's'} na memoria`
-    : 'A senha nunca e salva';
-  elements.serverStatus.textContent = state === 'error'
-    ? 'Falha no gateway'
-    : `${stateLabel(state)} na porta ${status.port}`;
+    ? t('vault.apiInMemory', { count: String(status.keyCount) })
+    : t('vault.passwordNeverSaved');
+  elements.serverStatus.textContent = (() => {
+    if (state === 'error') return t('electron.gatewayFailed');
+    if (state === 'running') return t('electron.gatewayOnline', { port: String(status.port) });
+    if (state === 'starting') return t('electron.gatewayStarting', { port: String(status.port) });
+    if (state === 'stopped') return t('electron.gatewayOffline');
+    if (state === 'locked') return t('electron.gatewayWaiting');
+    return `${stateLabel(state)} na porta ${status.port}`;
+  })();
   elements.rateLimitDetail.textContent = status.keyCount
-    ? `${status.requestsThisMinute}/${status.capacityPerMinute} em janela movel; ${status.limitPerKey} por API; delay extra ${status.requestDelayMs} ms`
-    : `35 RPM por API + delay extra de ${status.requestDelayMs ?? 0} ms`;
+    ? t('electron.rateLimitRunning', {
+        rpm: String(status.requestsThisMinute),
+        capacity: String(status.capacityPerMinute),
+        limit: String(status.limitPerKey),
+        delay: String(status.requestDelayMs)
+      })
+    : t('electron.rateLimitStopped', {
+        limit: String(status.limitPerKey),
+        delay: String(status.requestDelayMs ?? 0)
+      });
   if (document.activeElement !== elements.portInput) {
     elements.portInput.value = String(status.port);
   }
@@ -305,13 +340,23 @@ function renderStatus(status) {
   const message = state === 'error'
     ? status.proxyError
     : !status.unlocked
-      ? 'Digite a senha para carregar as APIs criptografadas.'
+      ? t('electron.enterPasswordHint')
       : !status.keyCount
-        ? 'Cadastre suas APIs NVIDIA para iniciar o gateway.'
+        ? t('electron.bothApisHint')
         : state === 'running'
-          ? 'Gateway pronto para Codex CLI, Claude Code e clientes proprios.'
-          : 'As APIs estao desbloqueadas apenas nesta sessao.';
-  elements.messageLine.querySelector('span:last-child').textContent = message;
+          ? t('electron.gatewayReady')
+          : t('electron.apisUnlocked');
+  elements.messageText.textContent = message;
+
+  // Aplica traducoes a todos os elementos com [data-i18n].
+  document.querySelectorAll('[data-i18n]').forEach((el) => {
+    el.textContent = t(el.dataset.i18n);
+  });
+  // Atualiza o hint da fonte do locale.
+  if (elements.localeSourceHint) {
+    const stored = (status.locale && status.locale !== '') ? 'electron.localeManual' : 'electron.localeDetected';
+    elements.localeSourceHint.textContent = t(stored);
+  }
 }
 
 function addApiField(value = '', existingIndex = null) {
@@ -328,7 +373,7 @@ function addApiField(value = '', existingIndex = null) {
   const remove = document.createElement('button');
   remove.type = 'button';
   remove.className = 'remove-api';
-  remove.textContent = 'Remover';
+  remove.textContent = t('electron.remove');
   remove.addEventListener('click', () => row.remove());
   row.append(input, remove);
   elements.apiFields.append(row);
@@ -389,8 +434,8 @@ async function persistModels(catalog, priority) {
     const status = await bridge.updateModels({ catalog, priority });
     renderStatus(status);
   } catch (error) {
-    elements.messageLine.querySelector('span:last-child').textContent =
-      error?.message || 'Nao foi possivel salvar os modelos.';
+    elements.messageText.textContent =
+      error?.message || t('error.sentenceCouldNotSave');
   } finally {
     busyModels = false;
   }
@@ -405,7 +450,7 @@ function wireTestButton(test, result, model) {
     const startedAt = Date.now();
     const tick = () => {
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
-      result.textContent = `Gerando calculadora... ${seconds}s`;
+      result.textContent = t('electron.testGenerating', { seconds });
     };
     tick();
     const liveTimer = setInterval(tick, 100);
@@ -419,21 +464,21 @@ function wireTestButton(test, result, model) {
         head.className = 'model-result-head';
         const status = document.createElement('span');
         const tokenInfo = Number(outcome.totalTokens) > 0
-          ? `, consumindo ${outcome.totalTokens} tokens`
+          ? t('electron.testTokens', { count: String(outcome.totalTokens) })
           : '';
-        status.textContent = `Respondeu em ${formatElapsed(outcome.elapsedMs)}${tokenInfo}`;
+        status.textContent = t('electron.testSuccess', { elapsed: formatElapsed(outcome.elapsedMs), tokens: tokenInfo });
         head.append(status);
         if (outcome.reply) {
           const copyReply = document.createElement('button');
           copyReply.type = 'button';
           copyReply.className = 'model-copy-reply';
-          copyReply.textContent = 'Copiar resposta';
+          copyReply.textContent = t('electron.copyResponse');
           copyReply.addEventListener('click', async () => {
             await bridge.copy(outcome.reply);
-            copyReply.textContent = 'Copiado';
+            copyReply.textContent = t('electron.copied');
             copyReply.classList.add('copied');
             setTimeout(() => {
-              copyReply.textContent = 'Copiar resposta';
+              copyReply.textContent = t('electron.copyResponse');
               copyReply.classList.remove('copied');
             }, 1200);
           });
@@ -448,13 +493,13 @@ function wireTestButton(test, result, model) {
         }
       } else {
         result.className = 'model-result fail';
-        const elapsed = outcome && outcome.elapsedMs ? ` (${formatElapsed(outcome.elapsedMs)})` : '';
-        result.textContent = `Falhou${elapsed}: ${(outcome && outcome.error) || 'sem resposta'}`;
+        const elapsed = outcome && outcome.elapsedMs ? ' (' + formatElapsed(outcome.elapsedMs) + ')' : '';
+        result.textContent = t('electron.testFailed', { elapsed, error: (outcome && outcome.error) || t('log.noDetail') });
       }
     } catch (error) {
       clearInterval(liveTimer);
       result.className = 'model-result fail';
-      result.textContent = `Falhou: ${error?.message || 'erro desconhecido'}`;
+      result.textContent = t('electron.testFailed', { elapsed: '', error: error?.message || t('log.unknownError') });
     } finally {
       test.disabled = false;
     }
@@ -468,14 +513,14 @@ function buildEditForm(entry, status) {
 
   const nameLabel = document.createElement('label');
   nameLabel.className = 'field-label';
-  nameLabel.textContent = 'Nome do modelo';
+  nameLabel.textContent = t('models.modelName');
   const nameInput = document.createElement('input');
   nameInput.type = 'text';
   nameInput.value = entry.label;
 
   const idLabel = document.createElement('label');
   idLabel.className = 'field-label';
-  idLabel.textContent = 'provider/modelo';
+  idLabel.textContent = t('models.providerModel');
   const idInput = document.createElement('input');
   idInput.type = 'text';
   idInput.value = entry.model;
@@ -488,11 +533,11 @@ function buildEditForm(entry, status) {
   const cancel = document.createElement('button');
   cancel.type = 'button';
   cancel.className = 'button ghost';
-  cancel.textContent = 'Cancelar';
+  cancel.textContent = t('electron.cancel');
   const save = document.createElement('button');
   save.type = 'submit';
   save.className = 'button primary';
-  save.textContent = 'Salvar';
+  save.textContent = t('electron.save');
   actions.append(cancel, save);
 
   form.append(nameLabel, nameInput, idLabel, idInput, error, actions);
@@ -503,13 +548,13 @@ function buildEditForm(entry, status) {
     const label = nameInput.value.trim();
     const model = idInput.value.trim();
     if (!model) {
-      error.textContent = 'Informe o provider/modelo.';
+      error.textContent = t('models.mustInformProvider');
       return;
     }
     const duplicated = catalogOf(status)
       .some((other) => other.model !== entry.model && other.model === model);
     if (duplicated) {
-      error.textContent = 'Ja existe um modelo com esse provider/modelo.';
+      error.textContent = t('models.alreadyExists');
       return;
     }
     const catalog = catalogOf(status).map((other) => other.model === entry.model
@@ -555,7 +600,7 @@ function buildModelGrid(status) {
     code.textContent = entry.model;
     const tag = document.createElement('span');
     tag.className = 'model-active-tag';
-    tag.textContent = 'Em uso';
+    tag.textContent = t('electron.inUse');
     tag.hidden = !isActive;
     name.append(strong, code, tag);
     head.append(icon, name);
@@ -609,8 +654,8 @@ function buildModelGrid(status) {
         try {
           renderStatus(await bridge.selectModel(entry.model));
         } catch (error) {
-          elements.messageLine.querySelector('span:last-child').textContent =
-            error?.message || 'Nao foi possivel selecionar o modelo.';
+          elements.messageText.textContent =
+            error?.message || t('error.generic');
         } finally {
           selectingModel = false;
         }
@@ -623,17 +668,17 @@ function buildModelGrid(status) {
     const test = document.createElement('button');
     test.type = 'button';
     test.className = 'model-test';
-    test.textContent = 'Testar';
+    test.textContent = t('electron.test');
     const edit = document.createElement('button');
     edit.type = 'button';
     edit.className = 'model-edit';
-    edit.textContent = 'Editar';
+    edit.textContent = t('electron.edit');
     actions.append(test, edit);
     if (canRemove) {
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'model-remove';
-      remove.textContent = 'Remover';
+      remove.textContent = t('electron.remove');
       remove.addEventListener('click', () => {
         const catalog = catalogOf(status).filter((other) => other.model !== entry.model);
         const priority = priorityOf(status).filter((id) => id !== entry.model);
@@ -670,8 +715,8 @@ function renderModelModal(status) {
   }
   if (elements.selectModeHint) {
     elements.selectModeHint.textContent = auto
-      ? 'Modo automatico: arraste a prioridade com as setas. O proxy usa sempre o primeiro modelo da lista com alguma API livre e desce a lista quando todas tomam 429, voltando ao topo assim que liberar.'
-      : 'Ligue o toggle do modelo que o proxy deve usar. So um fica ligado por vez. Use "Testar" para mandar um prompt complexo e medir o tempo de resposta.';
+      ? t('electron.autoModeHint')
+      : t('electron.manualModeHint');
   }
   const signature = JSON.stringify({
     auto,
@@ -724,8 +769,8 @@ function closeLocalKey() {
 if (elements.changeKeyButton) {
   elements.changeKeyButton.addEventListener('click', () => {
     if (!lastStatus.unlocked) {
-      elements.messageLine.querySelector('span:last-child').textContent =
-        'Desbloqueie o cofre antes de trocar a chave local.';
+      elements.messageText.textContent =
+        t('electron.lockVaultFirst');
       return;
     }
     openLocalKey();
@@ -740,11 +785,11 @@ if (elements.localKeyForm) {
     elements.localKeyError.textContent = '';
     const value = elements.localKeyInput.value.trim();
     if (value.length < 4) {
-      elements.localKeyError.textContent = 'A chave local deve ter ao menos 4 caracteres.';
+      elements.localKeyError.textContent = t('localkey.tooShort');
       return;
     }
     if (/\s/.test(value)) {
-      elements.localKeyError.textContent = 'A chave local nao pode conter espacos.';
+      elements.localKeyError.textContent = t('localkey.noSpaces');
       return;
     }
     try {
@@ -752,7 +797,7 @@ if (elements.localKeyForm) {
       renderStatus(status);
       closeLocalKey();
     } catch (error) {
-      elements.localKeyError.textContent = error?.message || 'Nao foi possivel salvar a chave.';
+      elements.localKeyError.textContent = error?.message || t('error.sentenceCouldNotSave');
     }
   });
 }
@@ -770,7 +815,7 @@ elements.unlockForm.addEventListener('submit', async (event) => {
     if (status.needLocalKey) openLocalKey();
     else if (!status.keyCount) openConfig();
   } catch (error) {
-    elements.unlockError.textContent = error?.message || 'Nao foi possivel desbloquear.';
+    elements.unlockError.textContent = error?.message || t('error.sentenceCouldNotUnlock');
   }
 });
 
@@ -797,7 +842,7 @@ elements.configForm.addEventListener('submit', async (event) => {
     elements.configModal.classList.add('hidden');
     renderStatus(status);
   } catch (error) {
-    elements.configError.textContent = error?.message || 'Nao foi possivel salvar.';
+    elements.configError.textContent = error?.message || t('error.sentenceCouldNotSave');
   }
 });
 
@@ -814,8 +859,8 @@ if (elements.autoToggleSwitch) {
     try {
       renderStatus(await bridge.setAutoToggle(!lastStatus.autoToggle));
     } catch (error) {
-      elements.messageLine.querySelector('span:last-child').textContent =
-        error?.message || 'Nao foi possivel alternar o modo automatico.';
+      elements.messageText.textContent =
+        error?.message || t('error.sentenceCouldNotToggle');
     } finally {
       busyModels = false;
     }
@@ -847,11 +892,11 @@ if (elements.addModelForm) {
     const label = elements.addModelName.value.trim();
     const model = elements.addModelId.value.trim();
     if (!label || !model) {
-      elements.addModelError.textContent = 'Preencha o nome e o provider/modelo.';
+      elements.addModelError.textContent = t('electron.fillNameAndId');
       return;
     }
     if (catalogOf(lastStatus).some((entry) => entry.model === model)) {
-      elements.addModelError.textContent = 'Esse provider/modelo ja esta na lista.';
+      elements.addModelError.textContent = t('electron.duplicateModel');
       return;
     }
     // Novo modelo entra no catalogo (icone vazio = placeholder com a 1a letra) e no
@@ -871,7 +916,7 @@ if (elements.copyLogButton) {
     if (!text) return;
     await bridge.copy(text);
     const original = elements.copyLogButton.textContent;
-    elements.copyLogButton.textContent = 'Copiado';
+    elements.copyLogButton.textContent = t('electron.copied');
     setTimeout(() => { elements.copyLogButton.textContent = original; }, 1000);
   });
 }
@@ -890,14 +935,14 @@ elements.savePortButton.addEventListener('click', async () => {
   try {
     renderStatus(await bridge.savePort(elements.portInput.value));
   } catch (error) {
-    elements.messageLine.querySelector('span:last-child').textContent = error?.message || 'Porta invalida.';
+    elements.messageText.textContent = error?.message || t('port.invalid');
   }
 });
 elements.saveDelayButton.addEventListener('click', async () => {
   try {
     renderStatus(await bridge.saveDelay(elements.delayInput.value));
   } catch (error) {
-    elements.messageLine.querySelector('span:last-child').textContent = error?.message || 'Delay invalido.';
+    elements.messageText.textContent = error?.message || t('delay.invalid');
   }
 });
 
@@ -910,14 +955,60 @@ document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click',
 document.querySelectorAll('[data-copy-target]').forEach((button) => button.addEventListener('click', async () => {
   await bridge.copy(byId(button.dataset.copyTarget).textContent);
   const original = button.textContent;
-  button.textContent = 'Copiado';
+  button.textContent = t('electron.copied');
   setTimeout(() => { button.textContent = original; }, 1000);
 }));
+
+// --- Modal de idioma ---
+const localeOptions = [
+  { code: 'en', flag: '🇺🇸', key: 'locale.en' },
+  { code: 'pt-BR', flag: '🇧🇷', key: 'locale.pt-BR' },
+  { code: 'de', flag: '🇩🇪', key: 'locale.de' },
+  { code: 'ru', flag: '🇷🇺', key: 'locale.ru' },
+  { code: 'zh-CN', flag: '🇨🇳', key: 'locale.zh-CN' }
+];
+
+function renderLocaleModal(status) {
+  if (!elements.localeList) return;
+  const current = (status.locale || 'en');
+  const fragment = document.createDocumentFragment();
+  localeOptions.forEach((opt) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'locale-option' + (opt.code === current ? ' active' : '');
+    btn.innerHTML = '<span class="locale-flag">' + opt.flag + '</span>' +
+      '<span class="locale-name">' + t(opt.key) + '</span>' +
+      '<span class="locale-check">✓</span>';
+    btn.addEventListener('click', async () => {
+      try {
+        const newStatus = await bridge.setLocale(opt.code);
+        renderStatus(newStatus);
+        renderLocaleModal(newStatus);
+      } catch (e) {
+        // fallback
+      }
+    });
+    fragment.append(btn);
+  });
+  elements.localeList.replaceChildren(fragment);
+}
+
+function openLocale() {
+  renderLocaleModal(lastStatus);
+  elements.localeModal.classList.remove('hidden');
+}
+
+if (elements.localeButton) {
+  elements.localeButton.addEventListener('click', openLocale);
+}
+if (elements.closeLocaleButton) {
+  elements.closeLocaleButton.addEventListener('click', () => elements.localeModal.classList.add('hidden'));
+}
 
 bridge.onStatus(renderStatus);
 bridge.getStatus().then((status) => {
   renderStatus(status);
   elements.unlockHint.textContent = status.hasConfig
-    ? 'Use a senha criada quando as APIs foram salvas. Ela nao fica armazenada.'
-    : 'Crie uma senha para criptografar suas APIs. Ela nao podera ser recuperada.';
+    ? t('electron.existingVaultHint')
+    : t('electron.firstRunHint');
 });

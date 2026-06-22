@@ -44,6 +44,8 @@ import {
   setSelectedModel
 } from '../services/runtime.ts';
 import { forwardToNvidia } from '../services/nvidia.ts';
+import { getLocale, getMessages, initLocale, setLocale, t } from '../i18n/index.ts';
+import type { Locale } from '../i18n/index.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -66,7 +68,8 @@ let unlockedConfig: UnlockedConfig = {
   autoToggle: DEFAULT_AUTO_TOGGLE,
   modelPriority: [...DEFAULT_MODEL_PRIORITY],
   modelCatalog: DEFAULT_MODEL_CATALOG.map((item) => ({ ...item })),
-  localApiKey: INTERNAL_API_KEY
+  localApiKey: INTERNAL_API_KEY,
+  locale: null
 };
 
 function configPath() {
@@ -75,6 +78,10 @@ function configPath() {
 
 function penaltiesPath() {
   return path.join(electronApp.getPath('documents'), 'AgentBridge', 'penalties.json');
+}
+
+function localePath() {
+  return path.join(electronApp.getPath('documents'), 'AgentBridge', 'locale.txt');
 }
 
 // Impressao digital curta da chave (NAO o segredo) para casar o castigo salvo com
@@ -166,7 +173,7 @@ function loadPenalties() {
 function normalizePort(value: unknown) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
-    throw new Error('Digite uma porta entre 1 e 65535.');
+    throw new Error(t('error.invalidPort'));
   }
   return parsed;
 }
@@ -174,7 +181,7 @@ function normalizePort(value: unknown) {
 function normalizeDelayMs(value: unknown) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0 || parsed > 600_000) {
-    throw new Error('Digite um delay entre 0 e 600000 ms.');
+    throw new Error(t('error.invalidDelay'));
   }
   return Math.round(parsed);
 }
@@ -217,7 +224,9 @@ function getStatus() {
     claudeBaseUrl: baseUrl,
     responsesEndpoint: `${baseUrl}/v1/responses`,
     messagesEndpoint: `${baseUrl}/v1/messages`,
-    chatEndpoint: `${baseUrl}/v1/chat/completions`
+    chatEndpoint: `${baseUrl}/v1/chat/completions`,
+    locale: getLocale(),
+    i18n: getMessages()
   };
 }
 
@@ -275,8 +284,8 @@ async function stopProxy() {
 }
 
 async function startProxy() {
-  if (!sessionPassword) throw new Error('Desbloqueie as APIs primeiro.');
-  if (!unlockedConfig.apiKeys.length) throw new Error('Cadastre ao menos uma API NVIDIA.');
+  if (!sessionPassword) throw new Error(t('error.unlockFirst'));
+  if (!unlockedConfig.apiKeys.length) throw new Error(t('error.cadastreFirst'));
   if (proxyServer) return;
 
   proxyState = 'starting';
@@ -310,13 +319,27 @@ async function startProxy() {
 
 async function unlock(password: unknown) {
   const normalized = String(password || '');
-  if (!normalized) throw new Error('Digite a senha de criptografia.');
+  if (!normalized) throw new Error(t('vault.enterPassword'));
+
+  // Tenta carregar locale do arquivo separado antes do desbloqueio.
+  // So le o arquivo se o i18n ainda nao foi inicializado (primeira chamada).
+  try {
+    const filePath = localePath();
+    if (existsSync(filePath)) {
+      const saved = readFileSync(filePath, 'utf8').trim();
+      if (saved) initLocale(saved);
+    }
+  } catch {
+    // fallback: usa deteccao do SO.
+  }
 
   if (configExists(configPath())) {
     unlockedConfig = unlockConfig(configPath(), normalized);
     sessionPassword = normalized;
     usageLog = [];
     setRuntimeConfig(unlockedConfig);
+    // Inicializa o i18n com o locale salvo no config (ou detecta do SO se ausente).
+    initLocale(unlockedConfig.locale);
     // So pede a chave local se o config ainda nao guarda uma (config antigo).
     localKeyResolved = localKeyStored(configPath());
     loadPenalties();
@@ -332,10 +355,13 @@ async function unlock(password: unknown) {
       autoToggle: DEFAULT_AUTO_TOGGLE,
       modelPriority: [...DEFAULT_MODEL_PRIORITY],
       modelCatalog: DEFAULT_MODEL_CATALOG.map((item) => ({ ...item })),
-      localApiKey: INTERNAL_API_KEY
+      localApiKey: INTERNAL_API_KEY,
+      locale: null
     };
     usageLog = [];
     clearRuntimeConfig();
+    // Inicializa o i18n via deteccao automatica do SO (config novo).
+    initLocale(null);
     // Cofre novo: ainda nao ha chave local definida, entao a UI vai pedir.
     localKeyResolved = false;
     proxyState = 'stopped';
@@ -345,7 +371,7 @@ async function unlock(password: unknown) {
 }
 
 async function persistConfig(input: any) {
-  if (!sessionPassword) throw new Error('A sessao ainda esta bloqueada.');
+  if (!sessionPassword) throw new Error(t('error.unlockFirst'));
   const submitted = Array.isArray(input?.apiKeys) ? input.apiKeys : [];
   const apiKeys = submitted
     .map((entry: unknown) => {
@@ -362,7 +388,7 @@ async function persistConfig(input: any) {
       );
     })
     .filter(Boolean);
-  if (!apiKeys.length) throw new Error('Cadastre ao menos uma API NVIDIA.');
+  if (!apiKeys.length) throw new Error(t('error.cadastreFirst'));
 
   const nextConfig: UnlockedConfig = {
     apiKeys,
@@ -374,7 +400,8 @@ async function persistConfig(input: any) {
     autoToggle: unlockedConfig.autoToggle,
     modelPriority: unlockedConfig.modelPriority,
     modelCatalog: unlockedConfig.modelCatalog,
-    localApiKey: unlockedConfig.localApiKey
+    localApiKey: unlockedConfig.localApiKey,
+    locale: unlockedConfig.locale
   };
   const shouldRestart = Boolean(proxyServer) && nextConfig.port !== unlockedConfig.port;
   if (shouldRestart) await stopProxy();
@@ -392,9 +419,9 @@ async function persistConfig(input: any) {
 // e a unica forma de "desligar" o anterior: o redirecionamento esta sempre ativo.
 // Persistido em texto puro junto com a config.
 async function selectModel(model: unknown) {
-  if (!sessionPassword) throw new Error('A sessao ainda esta bloqueada.');
+  if (!sessionPassword) throw new Error(t('error.unlockFirst'));
   const normalized = String(model || '').trim();
-  if (!normalized) throw new Error('Modelo invalido.');
+  if (!normalized) throw new Error(t('error.generic'));
   unlockedConfig.selectedModel = normalized;
   setSelectedModel(normalized);
   setRuntimeConfig(unlockedConfig);
@@ -409,7 +436,7 @@ async function selectModel(model: unknown) {
 // sozinho o modelo de cada chamada pela lista de prioridades. Persistido junto da
 // config (texto puro).
 async function setAutoMode(value: unknown) {
-  if (!sessionPassword) throw new Error('A sessao ainda esta bloqueada.');
+  if (!sessionPassword) throw new Error(t('error.unlockFirst'));
   unlockedConfig.autoToggle = Boolean(value);
   setAutoToggle(unlockedConfig.autoToggle);
   if (unlockedConfig.apiKeys.length) {
@@ -467,7 +494,7 @@ function sanitizePriority(value: unknown, catalog: ModelCatalogEntry[]): string[
 // Atualiza o catalogo de modelos (editar id/nome, adicionar novos) e a ordem da
 // lista de prioridades de uma vez so. Persistido junto da config.
 async function updateModels(payload: any) {
-  if (!sessionPassword) throw new Error('A sessao ainda esta bloqueada.');
+  if (!sessionPassword) throw new Error(t('error.unlockFirst'));
   const catalog = sanitizeCatalog(payload?.catalog);
   const priority = sanitizePriority(payload?.priority, catalog);
   unlockedConfig.modelCatalog = catalog;
@@ -487,8 +514,8 @@ async function updateModels(payload: any) {
 async function testModel(model: unknown) {
   const normalizedModel = String(model || '').trim();
   if (!normalizedModel) throw new Error('Modelo invalido.');
-  if (!sessionPassword) throw new Error('Desbloqueie as APIs primeiro.');
-  if (!unlockedConfig.apiKeys.length) throw new Error('Cadastre ao menos uma API NVIDIA.');
+  if (!sessionPassword) throw new Error(t('error.unlockFirst'));
+  if (!unlockedConfig.apiKeys.length) throw new Error(t('error.cadastreFirst'));
 
   const startedAt = Date.now();
   try {
@@ -534,7 +561,7 @@ async function testModel(model: unknown) {
 }
 
 async function saveDelay(value: unknown) {
-  if (!sessionPassword) throw new Error('A sessao ainda esta bloqueada.');
+  if (!sessionPassword) throw new Error(t('error.unlockFirst'));
   unlockedConfig.requestDelayMs = normalizeDelayMs(value);
   setRuntimeConfig(unlockedConfig);
   if (unlockedConfig.apiKeys.length) {
@@ -545,7 +572,7 @@ async function saveDelay(value: unknown) {
 }
 
 async function savePort(value: unknown) {
-  if (!sessionPassword) throw new Error('A sessao ainda esta bloqueada.');
+  if (!sessionPassword) throw new Error(t('error.unlockFirst'));
   const port = normalizePort(value);
   const wasRunning = Boolean(proxyServer);
   if (wasRunning) await stopProxy();
@@ -563,10 +590,10 @@ async function savePort(value: unknown) {
 // config. Pode ser chamada a qualquer momento pelo botao da UI, ou no primeiro
 // desbloqueio quando o config ainda nao tem chave.
 async function saveLocalKey(value: unknown) {
-  if (!sessionPassword) throw new Error('A sessao ainda esta bloqueada.');
+  if (!sessionPassword) throw new Error(t('error.unlockFirst'));
   const normalized = String(value || '').trim();
-  if (normalized.length < 4) throw new Error('A chave local deve ter ao menos 4 caracteres.');
-  if (/\s/.test(normalized)) throw new Error('A chave local nao pode conter espacos.');
+  if (normalized.length < 4) throw new Error(t('error.localKeyTooShort'));
+  if (/\s/.test(normalized)) throw new Error(t('error.localKeySpaces'));
   unlockedConfig.localApiKey = normalized;
   setLocalApiKey(normalized);
   setRuntimeConfig(unlockedConfig);
@@ -601,6 +628,24 @@ function registerIpc() {
     clipboard.writeText(value);
     return true;
   });
+  ipcMain.handle('locale:set', (_event, locale: string) => {
+    setLocale(locale as Locale);
+    unlockedConfig.locale = locale as Locale;
+    // Persiste locale em arquivo separado (acessivel antes do desbloqueio).
+    try {
+      const filePath = localePath();
+      mkdirSync(path.dirname(filePath), { recursive: true });
+      writeFileSync(filePath, locale, 'utf8');
+    } catch {
+      // Fallback: locale fica so no config criptografado.
+    }
+    if (unlockedConfig.apiKeys.length) {
+      saveConfig(configPath(), sessionPassword, unlockedConfig);
+    }
+    broadcastStatus();
+    return getStatus();
+  });
+  ipcMain.handle('locale:getMessages', () => getMessages());
 }
 
 function createMainWindow() {
@@ -640,6 +685,17 @@ electronApp.on('before-quit', () => {
 });
 
 electronApp.whenReady().then(() => {
+  // Carrega o locale salvo de locale.txt (se existir) ANTES de exibir a UI.
+  // Assim a tela de desbloqueio ja aparece no idioma escolhido.
+  try {
+    const lPath = localePath();
+    if (existsSync(lPath)) {
+      const saved = readFileSync(lPath, 'utf8').trim();
+      if (saved) initLocale(saved);
+    }
+  } catch {
+    // Fallback: detecta do SO (ja e o padrao do initLocale).
+  }
   registerIpc();
   startStatusRefresh();
   createMainWindow();

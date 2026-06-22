@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   DEFAULT_AUTO_TOGGLE,
+  DEFAULT_LOCALE,
   DEFAULT_MODEL,
   DEFAULT_MODEL_CATALOG,
   DEFAULT_MODEL_PRIORITY,
@@ -39,6 +40,8 @@ export type EncryptedConfig = {
   // Chave local que os clientes precisam enviar para usar o proxy. E um segredo,
   // entao fica criptografada igual as chaves NVIDIA. Ausente em configs antigas.
   localApiKey?: CipherText;
+  // Idioma da interface (texto puro, nao sensivel). Ausente em configs antigas.
+  locale?: string;
   salt: string;
   verifier: CipherText;
   apiKeys: CipherText[];
@@ -58,6 +61,8 @@ export type UnlockedConfig = {
   modelCatalog: ModelCatalogEntry[];
   // Chave local exigida dos clientes (Codex/Claude/etc.).
   localApiKey: string;
+  // Idioma da interface (ex.: 'pt-BR', 'en'). null/undefined -> deteccao automatica.
+  locale?: string | null;
 };
 
 // Saneia um catalogo vindo do disco: descarta entradas sem `model`, normaliza
@@ -151,6 +156,10 @@ export function unlockConfig(filePath: string, password: string): UnlockedConfig
   const localApiKey = stored.localApiKey
     ? (decryptValue(stored.localApiKey, key).trim() || INTERNAL_API_KEY)
     : INTERNAL_API_KEY;
+  // Configs antigas nao tem locale: fica null (deteccao automatica no boot).
+  const locale = typeof stored.locale === 'string' && stored.locale.trim()
+    ? stored.locale.trim()
+    : null;
   return {
     port: stored.port,
     requestDelayMs: normalizeRequestDelayMs(stored.requestDelayMs, stored.rateLimitMode),
@@ -159,7 +168,8 @@ export function unlockConfig(filePath: string, password: string): UnlockedConfig
     autoToggle: typeof stored.autoToggle === 'boolean' ? stored.autoToggle : DEFAULT_AUTO_TOGGLE,
     modelCatalog,
     modelPriority: normalizePriority(stored.modelPriority, modelCatalog),
-    localApiKey
+    localApiKey,
+    locale
   };
 }
 
@@ -207,6 +217,7 @@ export function saveConfig(
       (config.localApiKey && config.localApiKey.trim()) || INTERNAL_API_KEY,
       key
     ),
+    locale: config.locale && config.locale.trim() ? config.locale.trim() : undefined,
     salt: salt.toString('base64'),
     verifier: encryptValue(VERIFIER, key),
     apiKeys: config.apiKeys.map((apiKey) => encryptValue(apiKey, key))

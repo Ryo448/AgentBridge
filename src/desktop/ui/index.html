@@ -16,7 +16,7 @@
               <h1>AgentBridge</h1>
               <span id="appVersion" class="version">v3.0.0</span>
             </div>
-            <p>NVIDIA inference gateway</p>
+            <p data-i18n="electron.brand.description">NVIDIA inference gateway</p>
           </div>
         </div>
         <div id="proxyStatus" class="status-badge locked">
@@ -28,17 +28,17 @@
       <main>
         <section class="hero">
           <div class="hero-copy">
-            <span class="kicker">CODING AGENTS</span>
-            <h2>Uma API local para seus agentes de codigo.</h2>
-            <p>Compativel com OpenAI Responses, Chat Completions e Anthropic Messages.</p>
+            <span class="kicker" data-i18n="electron.hero.kicker">CODING AGENTS</span>
+            <h2 data-i18n="electron.hero.title">Uma API local para seus agentes de codigo.</h2>
+            <p data-i18n="electron.hero.subtitle">Compativel com OpenAI Responses, Chat Completions e Anthropic Messages.</p>
           </div>
           <div class="provider-card">
-            <span class="field-label">Provedor ativo</span>
+            <span class="field-label" data-i18n="electron.provider.active">Provedor ativo</span>
             <div class="provider-name">
               <span class="provider-avatar">N</span>
               <div>
-                <strong>NVIDIA</strong>
-                <span>Modelo definido pelo cliente</span>
+                <strong data-i18n="electron.provider.nvidia">NVIDIA</strong>
+                <span data-i18n="electron.provider.modelByClient">Modelo definido pelo cliente</span>
               </div>
             </div>
           </div>
@@ -46,24 +46,24 @@
 
         <section class="overview-grid">
           <article class="metric-card">
-            <span class="field-label">Cofre de APIs</span>
+            <span class="field-label" data-i18n="electron.vaultCard">Cofre de APIs</span>
             <strong id="vaultStatus">Bloqueado</strong>
             <span id="vaultDetail" class="metric-detail">A senha nunca e salva</span>
           </article>
           <article class="metric-card">
-            <span class="field-label">Gateway</span>
+            <span class="field-label" data-i18n="electron.gatewayCard">Gateway</span>
             <strong id="serverStatus">Aguardando senha</strong>
             <span id="rateLimitDetail" class="metric-detail">35 RPM por API + delay extra de 0 ms</span>
           </article>
           <article class="metric-card port-card">
-            <label class="field-label" for="portInput">Porta local</label>
+            <label class="field-label" for="portInput" data-i18n="electron.portCard">Porta local</label>
             <div class="port-control">
               <input id="portInput" type="number" min="1" max="65535" value="3000" />
-              <button id="savePortButton" class="icon-button" type="button">Salvar</button>
+              <button id="savePortButton" class="icon-button" type="button" data-i18n="electron.save">Salvar</button>
             </div>
           </article>
           <article class="metric-card delay-card">
-            <label class="field-label" for="delayInput">Delay extra (ms)</label>
+            <label class="field-label" for="delayInput" data-i18n="electron.delayCard">Delay extra (ms)</label>
             <div class="port-control">
               <input id="delayInput" type="number" min="0" max="600000" step="100" value="0" list="delayOptions" />
               <datalist id="delayOptions">
@@ -72,32 +72,33 @@
                 <option value="2500"></option>
                 <option value="5000"></option>
               </datalist>
-              <button id="saveDelayButton" class="icon-button" type="button">Salvar</button>
+              <button id="saveDelayButton" class="icon-button" type="button" data-i18n="electron.save">Salvar</button>
             </div>
           </article>
         </section>
 
         <section class="action-bar">
-          <button id="configButton" class="button primary" type="button">Configurar APIs</button>
-          <button id="startButton" class="button secondary" type="button">Iniciar gateway</button>
-          <button id="stopButton" class="button ghost" type="button">Parar</button>
-          <button id="penaltyButton" class="button ghost" type="button">APIs em castigo <span id="penaltyBadge" class="penalty-badge hidden">0</span></button>
+          <button id="configButton" class="button primary" type="button" data-i18n="electron.configApis">Configurar APIs</button>
+          <button id="startButton" class="button secondary" type="button" data-i18n="electron.startGateway">Iniciar gateway</button>
+          <button id="stopButton" class="button ghost" type="button" data-i18n="electron.stop">Parar</button>
+          <button id="penaltyButton" class="button ghost" type="button"><span data-i18n="electron.penalizedApis">APIs em castigo</span> <span id="penaltyBadge" class="penalty-badge hidden">0</span></button>
+          <button id="localeButton" class="button ghost" type="button" title="Idioma / Language">🌐</button>
         </section>
 
         <section class="model-redirect-panel" aria-label="Modelo do proxy">
           <div class="model-redirect-text">
-            <span class="field-label">Redirecionamento de modelo (sempre ativo)</span>
+            <span class="field-label" data-i18n="electron.redirect">Redirecionamento de modelo (sempre ativo)</span>
             <strong id="selectedModelLabel">deepseek-ai/deepseek-v4-pro</strong>
-            <span class="model-redirect-hint">Toda chamada que chega no proxy e reescrita para este modelo, nao importa o que o cliente mandar. No Codex/Claude use o modelo <code>AgentBridge</code>.</span>
+            <span class="model-redirect-hint"><span data-i18n="electron.redirectHint">Toda chamada que chega no proxy e reescrita para este modelo, nao importa o que o cliente mandar. No Codex/Claude use o modelo</span> <code>AgentBridge</code>.</span>
           </div>
-          <button id="selectModelButton" class="button primary" type="button">Selecionar modelo</button>
+          <button id="selectModelButton" class="button primary" type="button" data-i18n="electron.selectModel">Selecionar modelo</button>
         </section>
 
         <section class="workspace">
           <div class="workspace-header">
             <div>
-              <span class="kicker">INTEGRACAO</span>
-              <h3>Configuracao dos clientes</h3>
+              <span class="kicker" data-i18n="electron.integration">INTEGRACAO</span>
+              <h3 data-i18n="electron.clientConfig">Configuracao dos clientes</h3>
             </div>
             <div class="protocol-pills">
               <span>Responses</span><span>Anthropic</span><span>OpenAI</span>
@@ -106,93 +107,93 @@
           <div class="tabs">
             <button class="tab active" data-tab="codex" type="button">Codex CLI</button>
             <button class="tab" data-tab="claude" type="button">Claude Code</button>
-            <button class="tab" data-tab="api" type="button">API direta</button>
+            <button class="tab" data-tab="api" type="button" data-i18n="electron.directApi">API direta</button>
           </div>
 
           <div class="tab-panel active" data-panel="codex">
-            <p class="panel-description">Adicione ao <code>~/.codex/config.toml</code> e defina a chave no PowerShell.</p>
-            <div class="code-block"><pre id="codexConfig"></pre><button class="copy-code" data-copy-target="codexConfig">Copiar</button></div>
+            <p class="panel-description" data-i18n="electron.codexTabDesc">Adicione ao <code>~/.codex/config.toml</code> e defina a chave no PowerShell.</p>
+            <div class="code-block"><pre id="codexConfig"></pre><button class="copy-code" data-copy-target="codexConfig" data-i18n="electron.copy">Copiar</button></div>
           </div>
           <div class="tab-panel" data-panel="claude">
-            <p class="panel-description">Inicie o Claude Code com estas variaveis de ambiente.</p>
-            <div class="code-block"><pre id="claudeConfig"></pre><button class="copy-code" data-copy-target="claudeConfig">Copiar</button></div>
+            <p class="panel-description" data-i18n="electron.claudeTabDesc">Inicie o Claude Code com estas variaveis de ambiente.</p>
+            <div class="code-block"><pre id="claudeConfig"></pre><button class="copy-code" data-copy-target="claudeConfig" data-i18n="electron.copy">Copiar</button></div>
           </div>
           <div class="tab-panel" data-panel="api">
             <div class="connection-list">
-              <article class="connection-row"><div><span>Chat Completions</span><code id="chatValue"></code></div><button data-copy-target="chatValue">Copiar</button></article>
-              <article class="connection-row"><div><span>Responses API</span><code id="responsesValue"></code></div><button data-copy-target="responsesValue">Copiar</button></article>
-              <article class="connection-row"><div><span>Anthropic Messages</span><code id="messagesValue"></code></div><button data-copy-target="messagesValue">Copiar</button></article>
-              <article class="connection-row"><div><span>API key local</span><code id="apiKeyValue"></code></div><div class="connection-actions"><button id="changeKeyButton" type="button">Trocar chave</button><button data-copy-target="apiKeyValue">Copiar</button></div></article>
+              <article class="connection-row"><div><span data-i18n="electron.chatCompletions">Chat Completions</span><code id="chatValue"></code></div><button data-copy-target="chatValue" data-i18n="electron.copy">Copiar</button></article>
+              <article class="connection-row"><div><span data-i18n="electron.responsesApi">Responses API</span><code id="responsesValue"></code></div><button data-copy-target="responsesValue" data-i18n="electron.copy">Copiar</button></article>
+              <article class="connection-row"><div><span data-i18n="electron.messagesApi">Anthropic Messages</span><code id="messagesValue"></code></div><button data-copy-target="messagesValue" data-i18n="electron.copy">Copiar</button></article>
+              <article class="connection-row"><div><span data-i18n="electron.localApiKey">API key local</span><code id="apiKeyValue"></code></div><div class="connection-actions"><button id="changeKeyButton" type="button" data-i18n="electron.changeKey">Trocar chave</button><button data-copy-target="apiKeyValue" data-i18n="electron.copy">Copiar</button></div></article>
             </div>
           </div>
           <section class="usage-terminal" aria-labelledby="usageTerminalTitle">
             <div class="terminal-header">
               <div>
                 <span class="terminal-dot"></span>
-                <strong id="usageTerminalTitle">Uso das APIs</strong>
+                <strong id="usageTerminalTitle" data-i18n="electron.usageTitle">Uso das APIs</strong>
               </div>
               <div class="terminal-actions">
                 <span id="rpmCounter">0/0 RPM</span>
-                <button id="copyLogButton" class="icon-button" type="button">Copiar log</button>
+                <button id="copyLogButton" class="icon-button" type="button" data-i18n="electron.copyLog">Copiar log</button>
               </div>
             </div>
             <div id="usageTerminalOutput" class="terminal-output" role="log" aria-live="polite">
-              <div class="terminal-empty">Aguardando a primeira requisicao...</div>
+              <div class="terminal-empty" data-i18n="electron.waitingRequest">Aguardando a primeira requisicao...</div>
             </div>
           </section>
         </section>
-        <footer id="messageLine" class="message-line"><span class="pulse"></span><span>Aguardando desbloqueio.</span></footer>
+        <footer id="messageLine" class="message-line"><span class="pulse"></span><span id="messageText">Aguardando desbloqueio.</span></footer>
       </main>
     </div>
 
     <div id="unlockModal" class="modal-backdrop">
       <form id="unlockForm" class="modal-card compact">
-        <span class="kicker">COFRE LOCAL</span>
-        <h2>Digite sua senha</h2>
+        <span class="kicker" data-i18n="electron.unlockModal">COFRE LOCAL</span>
+        <h2 data-i18n="electron.enterPassword">Digite sua senha</h2>
         <p id="unlockHint">Ela sera usada somente nesta sessao para descriptografar suas APIs.</p>
-        <label class="field-label" for="passwordInput">Senha de criptografia</label>
+        <label class="field-label" for="passwordInput" data-i18n="electron.passwordLabel">Senha de criptografia</label>
         <input id="passwordInput" type="password" autocomplete="off" autofocus />
         <div id="unlockError" class="form-error"></div>
-        <button class="button primary wide" type="submit">Desbloquear AgentBridge</button>
+        <button class="button primary wide" type="submit" data-i18n="electron.unlockButton">Desbloquear AgentBridge</button>
       </form>
     </div>
 
     <div id="localKeyModal" class="modal-backdrop hidden">
       <form id="localKeyForm" class="modal-card compact">
         <div class="modal-heading">
-          <div><span class="kicker">CHAVE LOCAL</span><h2>Definir chave do gateway</h2></div>
-          <button id="closeLocalKeyButton" class="close-button" type="button">Fechar</button>
+          <div><span class="kicker" data-i18n="electron.localKeyModal">CHAVE LOCAL</span><h2 data-i18n="electron.defineKey">Definir chave do gateway</h2></div>
+          <button id="closeLocalKeyButton" class="close-button" type="button" data-i18n="electron.close">Fechar</button>
         </div>
-        <p id="localKeyHint">Esta e a chave que o Codex, o Claude Code e seus clientes precisam enviar para usar o proxy. Defina a sua para nao depender da padrao.</p>
-        <label class="field-label" for="localKeyInput">Chave local</label>
+        <p id="localKeyHint" data-i18n="electron.localKeyDesc">Esta e a chave que o Codex, o Claude Code e seus clientes precisam enviar para usar o proxy. Defina a sua para nao depender da padrao.</p>
+        <label class="field-label" for="localKeyInput" data-i18n="electron.localKeyLabel">Chave local</label>
         <input id="localKeyInput" type="text" autocomplete="off" spellcheck="false" placeholder="ex.: minha-chave-secreta" />
         <div id="localKeyError" class="form-error"></div>
-        <button class="button primary wide" type="submit">Salvar chave local</button>
+        <button class="button primary wide" type="submit" data-i18n="electron.saveLocalKey">Salvar chave local</button>
       </form>
     </div>
 
     <div id="configModal" class="modal-backdrop hidden">
       <form id="configForm" class="modal-card">
         <div class="modal-heading">
-          <div><span class="kicker">NVIDIA API KEYS</span><h2>Configurar rotacao</h2></div>
-          <button id="closeConfigButton" class="close-button" type="button">Fechar</button>
+          <div><span class="kicker" data-i18n="electron.configModal">NVIDIA API KEYS</span><h2 data-i18n="electron.configureRotation">Configurar rotacao</h2></div>
+          <button id="closeConfigButton" class="close-button" type="button" data-i18n="electron.close">Fechar</button>
         </div>
-        <p>As chaves sao criptografadas antes de serem gravadas no JSON.</p>
+        <p data-i18n="electron.keysEncrypted">As chaves sao criptografadas antes de serem gravadas no JSON.</p>
         <div id="apiFields" class="api-fields"></div>
-        <button id="addApiButton" class="button ghost" type="button">+ Adicionar outra API</button>
-        <div class="config-path">Arquivo: <code id="configPathValue"></code></div>
+        <button id="addApiButton" class="button ghost" type="button" data-i18n="electron.addAnotherApi">+ Adicionar outra API</button>
+        <div class="config-path"><span data-i18n="electron.fileLabel">Arquivo:</span> <code id="configPathValue"></code></div>
         <div id="configError" class="form-error"></div>
-        <button class="button primary wide" type="submit">Salvar APIs criptografadas</button>
+        <button class="button primary wide" type="submit" data-i18n="electron.saveEncrypted">Salvar APIs criptografadas</button>
       </form>
     </div>
 
     <div id="penaltyModal" class="modal-backdrop hidden">
       <div class="modal-card">
         <div class="modal-heading">
-          <div><span class="kicker">RATE LIMIT</span><h2>APIs em castigo</h2></div>
-          <button id="closePenaltyButton" class="close-button" type="button">Fechar</button>
+          <div><span class="kicker" data-i18n="electron.penaltyModal">RATE LIMIT</span><h2 data-i18n="electron.penalizedApisTitle">APIs em castigo</h2></div>
+          <button id="closePenaltyButton" class="close-button" type="button" data-i18n="electron.close">Fechar</button>
         </div>
-        <p>Chaves que receberam HTTP 429 ficam 1 hora fora do rodizio. O contador mostra quanto falta para cada uma voltar.</p>
+        <p data-i18n="electron.penaltyDesc">Chaves que receberam HTTP 429 ficam 1 hora fora do rodizio. O contador mostra quanto falta para cada uma voltar.</p>
         <div id="penaltyList" class="penalty-list"></div>
         <div class="config-path">Arquivo: <code id="penaltyPathValue"></code></div>
       </div>
@@ -201,14 +202,14 @@
     <div id="selectModal" class="modal-backdrop hidden">
       <div class="modal-card wide-card">
         <div class="modal-heading">
-          <div><span class="kicker">MODELOS NVIDIA</span><h2>Selecionar modelo</h2></div>
-          <button id="closeSelectButton" class="close-button" type="button">Fechar</button>
+          <div><span class="kicker" data-i18n="electron.modelModal">MODELOS NVIDIA</span><h2 data-i18n="electron.selectModelTitle">Selecionar modelo</h2></div>
+          <button id="closeSelectButton" class="close-button" type="button" data-i18n="electron.close">Fechar</button>
         </div>
 
         <div class="auto-toggle-row">
           <div class="auto-toggle-text">
-            <strong>Alternancia automatica de modelo</strong>
-            <span id="autoToggleHint" class="auto-toggle-hint">Quando ligada, o proxy escolhe sozinho o modelo seguindo a ordem de prioridade e troca de modelo se todas as APIs estiverem em castigo (429).</span>
+            <strong data-i18n="electron.autoToggleLabel">Alternancia automatica de modelo</strong>
+            <span id="autoToggleHint" class="auto-toggle-hint" data-i18n="electron.autoToggleHintOn">Quando ligada, o proxy escolhe sozinho o modelo seguindo a ordem de prioridade e troca de modelo se todas as APIs estiverem em castigo (429).</span>
           </div>
           <button id="autoToggleSwitch" class="toggle" type="button" role="switch" aria-checked="false" aria-label="Alternancia automatica de modelo">
             <span class="toggle-track"><span class="toggle-thumb"></span></span>
@@ -219,18 +220,30 @@
 
         <div id="modelGrid" class="model-grid"></div>
 
-        <button id="addModelButton" class="button ghost wide" type="button">+ Adicionar modelo</button>
+        <button id="addModelButton" class="button ghost wide" type="button" data-i18n="electron.addModel">+ Adicionar modelo</button>
         <form id="addModelForm" class="add-model-form hidden">
-          <label class="field-label" for="addModelName">Nome do modelo</label>
+          <label class="field-label" for="addModelName" data-i18n="electron.modelName">Nome do modelo</label>
           <input id="addModelName" type="text" placeholder="Ex.: Llama 4 Maverick" autocomplete="off" />
-          <label class="field-label" for="addModelId">provider/modelo</label>
+          <label class="field-label" for="addModelId" data-i18n="models.providerModel">provider/modelo</label>
           <input id="addModelId" type="text" placeholder="Ex.: meta/llama-4-maverick" autocomplete="off" />
           <div id="addModelError" class="form-error"></div>
           <div class="add-model-actions">
-            <button id="cancelAddModelButton" type="button" class="button ghost">Cancelar</button>
-            <button type="submit" class="button primary">Adicionar a lista</button>
+            <button id="cancelAddModelButton" type="button" class="button ghost" data-i18n="electron.cancel">Cancelar</button>
+            <button type="submit" class="button primary" data-i18n="electron.addToList">Adicionar a lista</button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <div id="localeModal" class="modal-backdrop hidden">
+      <div class="modal-card compact">
+        <div class="modal-heading">
+          <div><span class="kicker" data-i18n="electron.localeModal">IDIOMA</span><h2 data-i18n="electron.chooseLanguage">Escolher idioma</h2></div>
+          <button id="closeLocaleButton" class="close-button" type="button">Fechar</button>
+        </div>
+        <p data-i18n="electron.localeDesc">Selecione o idioma da interface do AgentBridge.</p>
+        <div id="localeList" class="locale-list"></div>
+        <div class="config-path"><span id="localeSourceHint">Detectado do sistema.</span></div>
       </div>
     </div>
 

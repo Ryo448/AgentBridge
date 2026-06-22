@@ -1,6 +1,6 @@
 import { serve } from '@hono/node-server';
 import type { ServerType } from '@hono/node-server';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { app as honoApp } from '../index.ts';
 import { TEST_PROMPT } from '../desktop/testPrompt.ts';
@@ -34,10 +34,13 @@ import {
   type ApiRequestLogEvent
 } from '../services/runtime.ts';
 import { forwardToNvidia } from '../services/nvidia.ts';
+import { getLocale, getMessages, initLocale, setLocale, t } from '../i18n/index.ts';
+import type { Locale } from '../i18n/index.ts';
 import {
   appDir,
   configPath,
   loadPenalties,
+  localePath,
   penaltiesPath,
   savePenalties
 } from './paths.ts';
@@ -97,7 +100,8 @@ function freshConfig(): UnlockedConfig {
     autoToggle: DEFAULT_AUTO_TOGGLE,
     modelPriority: [...DEFAULT_MODEL_PRIORITY],
     modelCatalog: DEFAULT_MODEL_CATALOG.map((item) => ({ ...item })),
-    localApiKey: INTERNAL_API_KEY
+    localApiKey: INTERNAL_API_KEY,
+    locale: null
   };
 }
 
@@ -199,8 +203,8 @@ function persistToDisk(): void {
 // Servidor (gateway).
 // ----------------------------------------------------------------------------
 async function startProxy(): Promise<void> {
-  if (!sessionPassword) throw new Error('Desbloqueie as APIs primeiro.');
-  if (!unlockedConfig.apiKeys.length) throw new Error('Cadastre ao menos uma API NVIDIA.');
+  if (!sessionPassword) throw new Error(t('error.unlockFirst'));
+  if (!unlockedConfig.apiKeys.length) throw new Error(t('error.cadastreFirst'));
   if (proxyServer) return;
   proxyState = 'starting';
   proxyError = '';
@@ -216,7 +220,7 @@ async function startProxy(): Promise<void> {
       proxyServer = null;
       proxyState = 'error';
       proxyError = error.code === 'EADDRINUSE'
-        ? `A porta ${unlockedConfig.port} ja esta em uso.`
+        ? t('error.portInUse', { port: String(unlockedConfig.port) })
         : error.message;
       if (!settled) resolve();
     });
@@ -265,7 +269,7 @@ function brandHeader(): string[] {
   return [
     '',
     ' ' + left + ' '.repeat(space) + right,
-    ' ' + c.faint('NVIDIA inference gateway · uma API local para seus agentes de codigo'),
+    ' ' + c.faint(t('header.subtitle')),
     ''
   ];
 }
@@ -288,28 +292,29 @@ function dashboardLines(): string[] {
   const colInner = Math.floor((w - 2) / 2);
 
   // Coluna esquerda: estado do proxy.
+  const vaultLabel = sessionPassword ? c.green(t('vault.unlocked')) : c.faint(t('vault.locked'));
   const proxyRows = [
-    field('Cofre', sessionPassword ? c.green('desbloqueado') : c.faint('bloqueado'), 12),
-    field('Gateway', statusBadge(proxyState), 12),
-    field('Porta', c.text(String(unlockedConfig.port)), 12),
-    field('Chaves', c.text(`${status.keyCount} API${status.keyCount === 1 ? '' : 's'}`), 12),
-    field('Delay', c.text(`${unlockedConfig.requestDelayMs} ms`), 12),
+    field(t('dashboard.vault'), vaultLabel, 12),
+    field(t('dashboard.gateway'), statusBadge(proxyState), 12),
+    field(t('dashboard.port'), c.text(String(unlockedConfig.port)), 12),
+    field(t('dashboard.keys'), c.text(String(status.keyCount)), 12),
+    field(t('dashboard.delay'), c.text(`${unlockedConfig.requestDelayMs} ms`), 12),
     field('RPM', `${c.text(`${status.requestsThisMinute}/${status.capacityPerMinute}`)}  ${bar(status.requestsThisMinute, status.capacityPerMinute || 1, Math.max(6, colInner - 22))}`, 12)
   ];
 
   // Coluna direita: modelo / redirecionamento.
   const headline = headlineModel();
   const modelRows = [
-    field('Modo', unlockedConfig.autoToggle ? c.accentStrong('automatico') : c.text('manual'), 12),
-    field('Alvo', c.accentStrong(headline), 12),
-    field('Rotulo', c.text(labelFor(headline)), 12),
-    field('Catalogo', c.text(`${unlockedConfig.modelCatalog.length} modelos`), 12),
-    field('Em uso', c.text(status.activeModel || headline), 12),
-    field('Cliente', c.faint('use o modelo ') + c.accent('AgentBridge'), 12)
+    field(t('dashboard.mode'), unlockedConfig.autoToggle ? c.accentStrong(t('dashboard.autoMode')) : c.text(t('dashboard.manualMode')), 12),
+    field(t('dashboard.target'), c.accentStrong(headline), 12),
+    field(t('dashboard.label'), c.text(labelFor(headline)), 12),
+    field(t('dashboard.catalog'), c.text(String(unlockedConfig.modelCatalog.length)), 12),
+    field(t('dashboard.inUse'), c.text(status.activeModel || headline), 12),
+    field(t('dashboard.client'), c.faint('AgentBridge'), 12)
   ];
 
-  const leftBox = box({ title: 'PROXY', lines: proxyRows, innerWidth: colInner, color: c.faint, titleColor: c.accent });
-  const rightBox = box({ title: 'MODELO', lines: modelRows, innerWidth: w - 2 - colInner - 2, color: c.faint, titleColor: c.accent });
+  const leftBox = box({ title: t('dashboard.proxy'), lines: proxyRows, innerWidth: colInner, color: c.faint, titleColor: c.accent });
+  const rightBox = box({ title: t('dashboard.modelTitle'), lines: modelRows, innerWidth: w - 2 - colInner - 2, color: c.faint, titleColor: c.accent });
 
   const lines = brandHeader();
   lines.push(...twoColumns(leftBox, rightBox).map((line) => ' ' + line));
@@ -323,15 +328,15 @@ function dashboardLines(): string[] {
   const tail = logs.slice(-logHeight);
   const logRows = tail.length
     ? tail.map((entry) => {
-        const time = c.faint(new Date(entry.timestamp).toLocaleTimeString('pt-BR'));
+        const time = c.faint(new Date(entry.timestamp).toLocaleTimeString(getLocale()));
         return `${time} ${usageMessage(entry)}`;
       })
-    : [c.faint('Aguardando a primeira requisicao...')];
+    : [c.faint(t('dashboard.waitingRequest'))];
   // Preenche ate a altura fixa para a caixa nao "pular".
   while (logRows.length < logHeight) logRows.push('');
   const rpm = c.accentStrong(`${status.requestsThisMinute}/${status.capacityPerMinute} RPM`);
   lines.push(...box({
-    title: `LOG AO VIVO   ${rpm}`,
+    title: t('dashboard.logTitle') + '   ' + rpm,
     lines: logRows,
     innerWidth: w,
     color: c.faint,
@@ -344,10 +349,10 @@ function dashboardLines(): string[] {
   const hint = proxyState === 'error'
     ? c.red('  ' + proxyError)
     : !status.keyCount
-      ? c.amber('  Cadastre suas APIs NVIDIA (tecla A) para iniciar o gateway.')
+      ? c.amber('  ' + t('dashboard.cadastreApis'))
       : proxyState === 'running'
-        ? c.green('  Gateway pronto para Codex CLI, Claude Code e clientes OpenAI/Anthropic.')
-        : c.muted('  Pressione S para iniciar o gateway.');
+        ? c.green('  ' + t('dashboard.gatewayReady'))
+        : c.muted('  ' + t('dashboard.pressToStart'));
   lines.push(hint);
   lines.push(hotkeyBar(penaltyCount));
   return lines;
@@ -356,19 +361,20 @@ function dashboardLines(): string[] {
 function hotkeyBar(penaltyCount: number): string {
   const key = (label: string, desc: string) => c.accent(label) + c.faint(' ' + desc);
   const castigo = penaltyCount > 0
-    ? c.accent('C') + c.amber(` castigos(${penaltyCount})`)
-    : key('C', 'castigos');
+    ? c.accent('C') + c.amber(' ' + t('hotkey.penalties') + '(' + penaltyCount + ')')
+    : key('C', t('hotkey.penalties'));
   return '  ' + [
-    proxyServer ? c.accent('S') + c.faint(' parar') : key('S', 'iniciar'),
-    key('A', 'APIs'),
-    key('M', 'modelos'),
+    proxyServer ? c.accent('S') + c.faint(' ' + t('hotkey.stop')) : key('S', t('hotkey.start')),
+    key('A', t('hotkey.apis')),
+    key('M', t('hotkey.models')),
     castigo,
-    key('P', 'porta'),
-    key('D', 'delay'),
-    key('K', 'chave'),
-    key('I', 'integracao'),
-    key('L', 'limpar'),
-    key('Q', 'sair')
+    key('P', t('hotkey.port')),
+    key('D', t('hotkey.delay')),
+    key('K', t('hotkey.key')),
+    key('I', t('hotkey.integration')),
+    key('T', t('hotkey.locale')),
+    key('L', t('hotkey.clear')),
+    key('Q', t('hotkey.quit'))
   ].join(c.faint(' · '));
 }
 
@@ -391,7 +397,7 @@ async function dashboardLoop(): Promise<void> {
         const key = (keyEvent.str || '').toLowerCase();
         const map: Record<string, string> = {
           s: 'toggle', a: 'apis', m: 'models', c: 'penalties',
-          p: 'port', d: 'delay', k: 'localkey', i: 'integration', l: 'clear', q: 'quit'
+          p: 'port', d: 'delay', k: 'localkey', i: 'integration', t: 'locale', l: 'clear', q: 'quit'
         };
         const resolved = map[key];
         if (!resolved) return;
@@ -403,8 +409,8 @@ async function dashboardLoop(): Promise<void> {
 
     if (action === 'quit') {
       const ok = await confirm({
-        header: sectionHeader('Sair', 'O gateway sera encerrado e as chaves saem da memoria.'),
-        question: 'Encerrar o AgentBridge?',
+        header: sectionHeader(t('quit.title'), t('quit.subtitle')),
+        question: t('quit.question'),
         defaultYes: true
       });
       if (ok) return;
@@ -428,11 +434,12 @@ async function handleAction(action: string): Promise<void> {
       case 'delay': await delayScreen(); break;
       case 'localkey': await localKeyScreen(); break;
       case 'integration': await integrationScreen(); break;
+      case 'locale': await localeScreen(); break;
       case 'clear': usageLog = []; break;
     }
   } catch (error) {
     await pause({
-      lines: sectionHeader('Erro', '').concat('  ' + c.red(error instanceof Error ? error.message : String(error)))
+      lines: sectionHeader(t('error.generic'), '').concat('  ' + c.red(error instanceof Error ? error.message : String(error)))
     });
   }
 }
@@ -448,23 +455,23 @@ function maskKey(key: string): string {
 async function apisScreen(): Promise<void> {
   while (true) {
     const header = sectionHeader(
-      'APIs NVIDIA',
-      `As chaves sao criptografadas (AES-256-GCM) em ${configPath()}`
+      t('apis.title'),
+      t('apis.subtitle', { path: configPath() })
     );
     const items = unlockedConfig.apiKeys.map((key, i) => ({
-      label: `API ${i + 1}  ${c.faint(maskKey(key))}`,
+      label: `${t('apis.api')} ${i + 1}  ${c.faint(maskKey(key))}`,
       value: `edit:${i}`,
       hint: ''
     }));
-    items.push({ label: c.accent('+ Adicionar API'), value: 'add', hint: '' });
+    items.push({ label: c.accent(t('apis.add')), value: 'add', hint: '' });
     if (unlockedConfig.apiKeys.length) {
-      items.push({ label: 'Salvar e criptografar', value: 'save', hint: c.faint(`${unlockedConfig.apiKeys.length} chave(s)`) });
+      items.push({ label: t('apis.save'), value: 'save', hint: c.faint(t('apis.nKeys', { count: String(unlockedConfig.apiKeys.length) })) });
     }
-    items.push({ label: c.muted('Voltar'), value: 'back', hint: '' });
+    items.push({ label: c.muted(t('apis.back')), value: 'back', hint: '' });
 
     const choice = await selectMenu({
       header: header.concat(
-        '  ' + c.faint('Enter numa API para editar/remover.')
+        '  ' + c.faint(t('apis.hint'))
       ),
       items
     });
@@ -472,11 +479,11 @@ async function apisScreen(): Promise<void> {
 
     if (choice === 'add') {
       const value = await promptText({
-        header: sectionHeader('Adicionar API', 'Cole a chave nvapi-... gerada em build.nvidia.com'),
-        label: 'Chave da API NVIDIA',
+        header: sectionHeader(t('apis.addTitle'), t('apis.addPrompt')),
+        label: t('apis.apiKeyLabel'),
         mask: true,
         placeholder: 'nvapi-...',
-        validate: (v) => (v.trim().startsWith('nvapi-') ? null : 'A chave deve comecar com nvapi-')
+        validate: (v) => (v.trim().startsWith('nvapi-') ? null : t('apis.mustStartWith'))
       });
       if (value && value.trim()) {
         unlockedConfig.apiKeys.push(value.trim());
@@ -490,8 +497,8 @@ async function apisScreen(): Promise<void> {
       refreshRuntime();
       savePenalties(unlockedConfig.apiKeys);
       await pause({
-        lines: sectionHeader('APIs salvas', '').concat(
-          '  ' + c.green(`${unlockedConfig.apiKeys.length} chave(s) criptografada(s) com sucesso.`),
+        lines: sectionHeader(t('apis.save'), '').concat(
+          '  ' + c.green(t('apis.saved', { count: String(unlockedConfig.apiKeys.length) })),
           '  ' + c.faint(configPath())
         )
       });
@@ -501,20 +508,20 @@ async function apisScreen(): Promise<void> {
     if (choice.startsWith('edit:')) {
       const idx = Number(choice.slice(5));
       const action = await selectMenu({
-        header: sectionHeader(`API ${idx + 1}`, maskKey(unlockedConfig.apiKeys[idx] || '')),
+        header: sectionHeader(`${t('apis.api')} ${idx + 1}`, maskKey(unlockedConfig.apiKeys[idx] || '')),
         items: [
-          { label: 'Substituir chave', value: 'replace' },
-          { label: c.red('Remover'), value: 'remove' },
-          { label: c.muted('Voltar'), value: 'back' }
+          { label: t('apis.replace'), value: 'replace' },
+          { label: c.red(t('apis.remove')), value: 'remove' },
+          { label: c.muted(t('apis.back')), value: 'back' }
         ]
       });
       if (action === 'replace') {
         const value = await promptText({
-          header: sectionHeader('Substituir API', ''),
-          label: 'Nova chave NVIDIA',
+          header: sectionHeader(t('apis.replaceTitle'), ''),
+          label: t('apis.newKeyLabel'),
           mask: true,
           placeholder: 'nvapi-...',
-          validate: (v) => (v.trim().startsWith('nvapi-') ? null : 'A chave deve comecar com nvapi-')
+          validate: (v) => (v.trim().startsWith('nvapi-') ? null : t('apis.mustStartWith'))
         });
         if (value && value.trim()) {
           unlockedConfig.apiKeys[idx] = value.trim();
@@ -540,17 +547,17 @@ async function modelsScreen(): Promise<void> {
       : unlockedConfig.selectedModel;
 
     const header = sectionHeader(
-      'Modelos NVIDIA',
+      t('models.title'),
       unlockedConfig.autoToggle
-        ? 'Automatico ligado: o proxy segue a ordem de prioridade e troca em 429.'
-        : 'Manual: toda chamada vai para o modelo selecionado.'
+        ? t('models.autoSubtitle')
+        : t('models.manualSubtitle')
     );
 
     const items: Array<{ label: string; value: string; hint?: string }> = [];
     items.push({
       label: (unlockedConfig.autoToggle ? c.accent('◉') : c.faint('◯')) +
-        ' Alternancia automatica de modelo ' +
-        (unlockedConfig.autoToggle ? c.accentStrong('[ON]') : c.faint('[OFF]')),
+        ' ' + t('models.autoToggle') + ' ' +
+        (unlockedConfig.autoToggle ? c.accentStrong(t('models.on')) : c.faint(t('models.off'))),
       value: 'auto'
     });
     ordered.forEach((entry, i) => {
@@ -564,8 +571,8 @@ async function modelsScreen(): Promise<void> {
         hint: c.faint(entry.model)
       });
     });
-    items.push({ label: c.accent('+ Adicionar modelo'), value: 'add' });
-    items.push({ label: c.muted('Voltar'), value: 'back' });
+    items.push({ label: c.accent(t('models.add')), value: 'add' });
+    items.push({ label: c.muted(t('models.back')), value: 'back' });
 
     const choice = await selectMenu({ header, items });
     if (!choice || choice === 'back') return;
@@ -595,13 +602,13 @@ async function modelActionScreen(model: string): Promise<void> {
   const choice = await selectMenu({
     header: sectionHeader(entry.label, model),
     items: [
-      { label: 'Usar este modelo (manual)', value: 'use' },
-      { label: 'Testar modelo', value: 'test', hint: c.faint('gera uma calculadora e mede o tempo') },
-      { label: 'Subir prioridade', value: 'up', disabled: idx <= 0 },
-      { label: 'Descer prioridade', value: 'down', disabled: idx < 0 || idx >= unlockedConfig.modelPriority.length - 1 },
-      { label: 'Editar nome / id', value: 'edit' },
-      { label: c.red('Remover do catalogo'), value: 'remove', disabled: unlockedConfig.modelCatalog.length <= 1 },
-      { label: c.muted('Voltar'), value: 'back' }
+      { label: t('models.useThis'), value: 'use' },
+      { label: t('models.test'), value: 'test', hint: c.faint('') },
+      { label: t('models.moveUp'), value: 'up', disabled: idx <= 0 },
+      { label: t('models.moveDown'), value: 'down', disabled: idx < 0 || idx >= unlockedConfig.modelPriority.length - 1 },
+      { label: t('models.edit'), value: 'edit' },
+      { label: c.red(t('models.removeCatalog')), value: 'remove', disabled: unlockedConfig.modelCatalog.length <= 1 },
+      { label: c.muted(t('models.back')), value: 'back' }
     ]
   });
 
@@ -646,19 +653,19 @@ async function modelActionScreen(model: string): Promise<void> {
 
 async function addModelScreen(): Promise<void> {
   const label = await promptText({
-    header: sectionHeader('Adicionar modelo', ''),
-    label: 'Nome amigavel (ex.: Llama 4 Maverick)',
-    placeholder: 'Nome do modelo'
+    header: sectionHeader(t('models.addModelTitle'), ''),
+    label: t('models.friendlyName'),
+    placeholder: t('models.friendlyNamePlaceholder')
   });
   if (label === null) return;
   const model = await promptText({
-    header: sectionHeader('Adicionar modelo', label.trim()),
-    label: 'provider/modelo (ex.: meta/llama-4-maverick)',
-    placeholder: 'provider/modelo',
+    header: sectionHeader(t('models.addModelTitle'), label.trim()),
+    label: t('models.providerModel'),
+    placeholder: t('models.providerModelPlaceholder'),
     validate: (v) => {
       const id = v.trim();
-      if (!id) return 'Informe o provider/modelo.';
-      if (unlockedConfig.modelCatalog.some((item) => item.model === id)) return 'Ja existe esse provider/modelo.';
+      if (!id) return t('models.mustInformProvider');
+      if (unlockedConfig.modelCatalog.some((item) => item.model === id)) return t('models.alreadyExists');
       return null;
     }
   });
@@ -677,19 +684,19 @@ async function editModelScreen(model: string): Promise<void> {
   const entry = unlockedConfig.modelCatalog.find((item) => item.model === model);
   if (!entry) return;
   const label = await promptText({
-    header: sectionHeader('Editar modelo', model),
-    label: 'Nome do modelo',
+    header: sectionHeader(t('models.editModelTitle'), model),
+    label: t('models.modelName'),
     initial: entry.label
   });
   if (label === null) return;
   const newId = await promptText({
-    header: sectionHeader('Editar modelo', label.trim()),
-    label: 'provider/modelo',
+    header: sectionHeader(t('models.editModelTitle'), label.trim()),
+    label: t('models.providerModel'),
     initial: entry.model,
     validate: (v) => {
       const id = v.trim();
-      if (!id) return 'Informe o provider/modelo.';
-      if (id !== model && unlockedConfig.modelCatalog.some((item) => item.model === id)) return 'Ja existe esse provider/modelo.';
+      if (!id) return t('models.mustInformProvider');
+      if (id !== model && unlockedConfig.modelCatalog.some((item) => item.model === id)) return t('models.alreadyExists');
       return null;
     }
   });
@@ -709,17 +716,17 @@ async function editModelScreen(model: string): Promise<void> {
 // Testa um modelo enviando o TEST_PROMPT por toda a rotacao e medindo o tempo.
 async function testModelScreen(model: string): Promise<void> {
   if (!unlockedConfig.apiKeys.length) {
-    await pause({ lines: sectionHeader('Testar modelo', '').concat('  ' + c.amber('Cadastre ao menos uma API primeiro.')) });
+    await pause({ lines: sectionHeader(t('models.test'), '').concat('  ' + c.amber(t('models.registerFirst'))) });
     return;
   }
   const startedAt = Date.now();
   let done = false;
   const render = () => {
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
-    drawFrame(sectionHeader('Testar modelo', model).concat(
-      '  ' + c.amber(`Gerando calculadora... ${seconds}s`),
+    drawFrame(sectionHeader(t('models.test'), model).concat(
+      '  ' + c.amber(t('models.testGenerating', { seconds })),
       '',
-      c.faint('  Enviando o prompt por toda a rotacao de chaves...')
+      c.faint('  ' + t('models.testSubtitle'))
     ));
   };
   render();
@@ -734,12 +741,12 @@ async function testModelScreen(model: string): Promise<void> {
     const elapsed = Date.now() - startedAt;
     const payload: any = await response.json().catch(() => ({}));
     if (!response.ok) {
-      resultLines = ['  ' + c.red(`Falhou (HTTP ${response.status}) em ${formatElapsed(elapsed)}: ${payload?.error?.message || 'sem detalhe'}`)];
+      resultLines = ['  ' + c.red(t('models.testFail', { status: String(response.status), elapsed: formatElapsed(elapsed), message: payload?.error?.message || t('models.testNoDetail') }))];
     } else {
       const reply = String(payload?.choices?.[0]?.message?.content || '').trim();
       const tokens = Number(payload?.usage?.total_tokens) || 0;
       resultLines = [
-        '  ' + c.green(`Respondeu em ${formatElapsed(elapsed)}${tokens ? `, ${tokens} tokens` : ''}`),
+        '  ' + c.green(t('models.testSuccess', { elapsed: formatElapsed(elapsed), tokens: tokens ? t('models.testTokens', { count: String(tokens) }) : '' })),
         ''
       ];
       const snippet = reply.split('\n').slice(0, 18);
@@ -747,12 +754,12 @@ async function testModelScreen(model: string): Promise<void> {
       if (reply.split('\n').length > 18) resultLines.push('  ' + c.faint('│ ...'));
     }
   } catch (error) {
-    resultLines = ['  ' + c.red(`Falhou: ${error instanceof Error ? error.message : String(error)}`)];
+    resultLines = ['  ' + c.red(t('models.testFailed', { message: error instanceof Error ? error.message : String(error) }))];
   } finally {
     done = true;
     clearInterval(timer);
   }
-  await pause({ lines: sectionHeader('Resultado do teste', model).concat(resultLines) });
+  await pause({ lines: sectionHeader(t('models.test'), model).concat(resultLines) });
 }
 
 // ----------------------------------------------------------------------------
@@ -774,25 +781,25 @@ async function penaltiesScreen(): Promise<void> {
         .map((r) => JSON.parse(r) as { apiNumber: number; model: string; penaltyStartedAt: number; penaltyUntil: number; successesBefore429?: number })
         .sort((a, b) => a.penaltyUntil - b.penaltyUntil);
 
-      const header = sectionHeader('APIs em castigo (HTTP 429)', `Cooldown de 1h por (chave, modelo). Arquivo: ${penaltiesPath()}`);
+      const header = sectionHeader(t('penalties.title'), t('penalties.subtitle', { path: penaltiesPath() }));
       const w = innerWidth();
       let bodyLines: string[];
       if (!parsed.length) {
-        bodyLines = [c.green('Nenhuma API em castigo agora.'), '', c.faint('Tudo no rodizio normal.')];
+        bodyLines = [c.green(t('penalties.none')), '', c.faint(t('penalties.normalRotation'))];
       } else {
         bodyLines = parsed.map((item) => {
           const title = item.model ? `API ${item.apiNumber} · ${item.model}` : `API ${item.apiNumber}`;
           const remaining = item.penaltyUntil - now;
           const countdown = remaining > 0 ? c.amber(formatCountdown(remaining)) : c.green('00:00');
-          const requests = c.faint(`${item.successesBefore429 || 0} requests`);
+          const requests = c.faint(t('penalties.requests', { count: String(item.successesBefore429 || 0) }));
           const left = padEndVisible(c.text(title), Math.max(16, w - 22));
           return `${left} ${requests}  ${countdown}`;
         });
       }
       drawFrame(header.concat(
-        box({ title: 'CASTIGOS', lines: bodyLines, innerWidth: w, color: c.faint, titleColor: c.amber }).map((l) => ' ' + l),
+        box({ title: t('penalties.title'), lines: bodyLines, innerWidth: w, color: c.faint, titleColor: c.amber }).map((l) => ' ' + l),
         '',
-        c.faint('  Atualiza a cada segundo · Esc voltar')
+        c.faint('  ' + t('penalties.refreshHint'))
       ));
     };
     render();
@@ -812,12 +819,12 @@ async function penaltiesScreen(): Promise<void> {
 // ----------------------------------------------------------------------------
 async function portScreen(): Promise<void> {
   const value = await promptText({
-    header: sectionHeader('Porta local', 'Onde o gateway escuta (1-65535). Reinicia se estiver rodando.'),
-    label: 'Porta',
+    header: sectionHeader(t('port.title'), t('port.subtitle')),
+    label: t('port.label'),
     initial: String(unlockedConfig.port),
     validate: (v) => {
       const n = Number(v);
-      return Number.isInteger(n) && n >= 1 && n <= 65535 ? null : 'Digite uma porta entre 1 e 65535.';
+      return Number.isInteger(n) && n >= 1 && n <= 65535 ? null : t('port.invalid');
     }
   });
   if (value === null) return;
@@ -834,12 +841,12 @@ async function portScreen(): Promise<void> {
 // ----------------------------------------------------------------------------
 async function delayScreen(): Promise<void> {
   const value = await promptText({
-    header: sectionHeader('Delay extra (ms)', 'Espacamento adicional antes de cada chamada NVIDIA (0-600000).'),
-    label: 'Delay em ms',
+    header: sectionHeader(t('delay.title'), t('delay.subtitle')),
+    label: t('delay.label'),
     initial: String(unlockedConfig.requestDelayMs),
     validate: (v) => {
       const n = Number(v);
-      return Number.isFinite(n) && n >= 0 && n <= 600_000 ? null : 'Digite um valor entre 0 e 600000 ms.';
+      return Number.isFinite(n) && n >= 0 && n <= 600_000 ? null : t('delay.invalid');
     }
   });
   if (value === null) return;
@@ -853,17 +860,17 @@ async function delayScreen(): Promise<void> {
 // ----------------------------------------------------------------------------
 async function localKeyScreen(firstTime = false): Promise<void> {
   const subtitle = firstTime
-    ? 'Defina a chave que o Codex/Claude vao enviar. Sem ela, usa-se a padrao.'
-    : 'Trocar a chave que os clientes enviam (Bearer / x-api-key).';
+    ? t('localkey.firstTimeSubtitle')
+    : t('localkey.changeSubtitle');
   const value = await promptText({
-    header: sectionHeader('Chave local', subtitle),
-    label: 'Chave local',
+    header: sectionHeader(t('localkey.title'), subtitle),
+    label: t('localkey.label'),
     initial: firstTime ? '' : localKey(),
-    placeholder: 'ex.: minha-chave-secreta',
+    placeholder: t('localkey.placeholder'),
     validate: (v) => {
       const key = v.trim();
-      if (key.length < 4) return 'Use ao menos 4 caracteres.';
-      if (/\s/.test(key)) return 'A chave nao pode conter espacos.';
+      if (key.length < 4) return t('localkey.tooShort');
+      if (/\s/.test(key)) return t('localkey.noSpaces');
       return null;
     }
   });
@@ -872,9 +879,52 @@ async function localKeyScreen(firstTime = false): Promise<void> {
   refreshRuntime();
   persistToDisk();
   await pause({
-    lines: sectionHeader('Chave local salva', '').concat(
-      '  ' + c.green('A nova chave ja vale para os clientes.'),
-      '  ' + c.faint('Atualize a variavel de ambiente do Codex/Claude com ela.')
+    lines: sectionHeader(t('localkey.saved'), '').concat(
+      '  ' + c.green(t('localkey.savedMessage')),
+      '  ' + c.faint(t('localkey.updateEnv'))
+    )
+  });
+}
+
+// ----------------------------------------------------------------------------
+// Tela: Idioma da interface.
+// ----------------------------------------------------------------------------
+import { availableLocales } from '../i18n/index.ts';
+
+async function localeScreen(): Promise<void> {
+  const current = getLocale();
+  const options = availableLocales();
+  const items: Array<{ label: string; value: string; hint?: string }> = options.map((opt) => ({
+    label: (opt.code === current ? c.accent('● ') : c.faint('○ ')) + opt.flag + '  ' + opt.label,
+    value: opt.code
+  }));
+  items.push({ label: c.muted(t('models.back')), value: 'back' });
+
+  const choice = await selectMenu<string>({
+    header: sectionHeader(
+      t('locale.title'),
+      t('locale.subtitle', { current: options.find((o) => o.code === current)?.label || current })
+    ),
+    items
+  });
+  if (!choice || choice === 'back') return;
+
+  setLocale(choice as Locale);
+  unlockedConfig.locale = choice as Locale;
+  // Persiste locale em arquivo separado (acessivel antes do desbloqueio).
+  try {
+    const lPath = localePath();
+    mkdirSync(path.dirname(lPath), { recursive: true });
+    writeFileSync(lPath, choice, 'utf8');
+  } catch {
+    // Fallback: locale fica so no config criptografado.
+  }
+  persistToDisk();
+
+  const label = options.find((o) => o.code === choice)?.label || choice;
+  await pause({
+    lines: sectionHeader(t('locale.title'), '').concat(
+      '  ' + c.green(t('locale.changed', { locale: label }))
     )
   });
 }
@@ -885,13 +935,13 @@ async function localKeyScreen(firstTime = false): Promise<void> {
 async function integrationScreen(): Promise<void> {
   while (true) {
     const choice = await selectMenu({
-      header: sectionHeader('Integracao dos clientes', `Endereco do gateway: ${baseUrl()}`),
+      header: sectionHeader(t('integration.title'), t('integration.subtitle', { url: baseUrl() })),
       items: [
-        { label: 'Codex CLI', value: 'codex', hint: c.faint('config.toml + variavel') },
-        { label: 'Claude Code', value: 'claude', hint: c.faint('variaveis de ambiente') },
-        { label: 'API direta', value: 'api', hint: c.faint('endpoints + chave') },
-        { label: 'Exportar tudo para um arquivo .txt', value: 'export' },
-        { label: c.muted('Voltar'), value: 'back' }
+        { label: t('integration.codex'), value: 'codex', hint: c.faint(t('integration.codexDesc')) },
+        { label: t('integration.claude'), value: 'claude', hint: c.faint(t('integration.claudeDesc')) },
+        { label: t('integration.directApi'), value: 'api', hint: c.faint(t('integration.apiDesc')) },
+        { label: t('integration.export'), value: 'export' },
+        { label: c.muted(t('integration.back')), value: 'back' }
       ]
     });
     if (!choice || choice === 'back') return;
@@ -908,10 +958,10 @@ async function copyAndShow(title: string, subtitle: string, text: string): Promi
   const result = await copyToClipboard(text);
   const note =
     result === 'native'
-      ? c.green('✓ Copiado para a area de transferencia.')
+      ? c.green(t('integration.copied'))
       : result === 'osc52'
-        ? c.green('✓ Copiado via terminal (OSC52).') + c.faint('  Se nao colar, selecione abaixo.')
-        : c.amber('Nao consegui copiar sozinho. Selecione o texto abaixo.');
+        ? c.green(t('integration.copiedViaTerminal')) + c.faint('  Se nao colar, selecione abaixo.')
+        : c.amber(t('integration.copyFailed'));
   const block = text.split('\n').map((line) => '   ' + c.text(line));
   await pause({ lines: sectionHeader(title, subtitle).concat('  ' + note, '', ...block) });
 }
@@ -919,21 +969,21 @@ async function copyAndShow(title: string, subtitle: string, text: string): Promi
 async function codexScreen(): Promise<void> {
   while (true) {
     const choice = await selectMenu({
-      header: sectionHeader('Codex CLI', 'O config.toml vai no ~/.codex/config.toml; a variavel, no shell.'),
+      header: sectionHeader(t('integration.codex'), t('integration.configTomlDesc')),
       items: [
-        { label: 'Copiar config.toml', value: 'toml', hint: c.faint('bloco [model_providers]') },
-        { label: 'Copiar variavel — bash / zsh', value: 'bash', hint: c.faint('export AGENTBRIDGE_API_KEY=...') },
-        { label: 'Copiar variavel — PowerShell', value: 'pwsh', hint: c.faint('$env:AGENTBRIDGE_API_KEY=...') },
-        { label: c.muted('Voltar'), value: 'back' }
+        { label: t('integration.codexToml'), value: 'toml', hint: c.faint('[model_providers]') },
+        { label: t('integration.codexBash'), value: 'bash', hint: c.faint('export AGENTBRIDGE_API_KEY=...') },
+        { label: t('integration.codexPwsh'), value: 'pwsh', hint: c.faint('$env:AGENTBRIDGE_API_KEY=...') },
+        { label: c.muted(t('integration.back')), value: 'back' }
       ]
     });
     if (!choice || choice === 'back') return;
     if (choice === 'toml') {
-      await copyAndShow('Codex · config.toml', 'Cole no ~/.codex/config.toml', codexConfigToml(baseUrl()));
+      await copyAndShow(t('integration.codexToml'), t('integration.codexTomlDesc'), codexConfigToml(baseUrl()));
     } else if (choice === 'bash') {
-      await copyAndShow('Codex · variavel (bash / zsh)', 'Cole no terminal antes de rodar o Codex', codexEnv(localKey(), 'bash'));
+      await copyAndShow(t('integration.codexBash'), t('integration.codexBashDesc'), codexEnv(localKey(), 'bash'));
     } else if (choice === 'pwsh') {
-      await copyAndShow('Codex · variavel (PowerShell)', 'Cole no PowerShell antes de rodar o Codex', codexEnv(localKey(), 'powershell'));
+      await copyAndShow(t('integration.codexPwsh'), t('integration.codexPwshDesc'), codexEnv(localKey(), 'powershell'));
     }
   }
 }
@@ -941,18 +991,18 @@ async function codexScreen(): Promise<void> {
 async function claudeScreen(): Promise<void> {
   while (true) {
     const choice = await selectMenu({
-      header: sectionHeader('Claude Code', 'Escolha o shell. Cole o bloco e o Claude Code ja inicia.'),
+      header: sectionHeader(t('integration.claude'), t('integration.chooseShell')),
       items: [
-        { label: 'Copiar — bash / zsh', value: 'bash', hint: c.faint('export ...') },
-        { label: 'Copiar — PowerShell', value: 'pwsh', hint: c.faint('$env:...') },
-        { label: c.muted('Voltar'), value: 'back' }
+        { label: t('integration.claudeBash'), value: 'bash', hint: c.faint('export ...') },
+        { label: t('integration.claudePwsh'), value: 'pwsh', hint: c.faint('$env:...') },
+        { label: c.muted(t('integration.back')), value: 'back' }
       ]
     });
     if (!choice || choice === 'back') return;
     if (choice === 'bash') {
-      await copyAndShow('Claude Code · bash / zsh', 'Cole no terminal', claudeSnippet(baseUrl(), localKey(), 'bash'));
+      await copyAndShow(t('integration.claudeBash'), t('integration.claudeBashDesc'), claudeSnippet(baseUrl(), localKey(), 'bash'));
     } else if (choice === 'pwsh') {
-      await copyAndShow('Claude Code · PowerShell', 'Cole no PowerShell', claudeSnippet(baseUrl(), localKey(), 'powershell'));
+      await copyAndShow(t('integration.claudePwsh'), t('integration.claudePwshDesc'), claudeSnippet(baseUrl(), localKey(), 'powershell'));
     }
   }
 }
@@ -960,33 +1010,33 @@ async function claudeScreen(): Promise<void> {
 async function apiDirectScreen(): Promise<void> {
   while (true) {
     const entries = [
-      { label: 'Chave local', value: 'key', text: localKey() },
-      { label: 'Chat Completions', value: 'chat', text: `${baseUrl()}/v1/chat/completions` },
-      { label: 'Responses', value: 'responses', text: `${baseUrl()}/v1/responses` },
-      { label: 'Anthropic Messages', value: 'messages', text: `${baseUrl()}/v1/messages` },
-      { label: 'Health', value: 'health', text: `${baseUrl()}/health` },
-      { label: 'Modelos', value: 'models', text: `${baseUrl()}/v1/models` }
+      { label: t('integration.apiKey'), value: 'key', text: localKey() },
+      { label: t('integration.chatCompletions'), value: 'chat', text: `${baseUrl()}/v1/chat/completions` },
+      { label: t('integration.responses'), value: 'responses', text: `${baseUrl()}/v1/responses` },
+      { label: t('integration.anthropicMessages'), value: 'messages', text: `${baseUrl()}/v1/messages` },
+      { label: t('integration.health'), value: 'health', text: `${baseUrl()}/health` },
+      { label: t('integration.models'), value: 'models', text: `${baseUrl()}/v1/models` }
     ];
     const choice = await selectMenu({
-      header: sectionHeader('API direta', 'Enter copia o valor. Auth via Bearer ou x-api-key.'),
+      header: sectionHeader(t('integration.directApi'), t('integration.enterToCopy')),
       items: [
         ...entries.map((entry) => ({ label: entry.label, value: entry.value, hint: c.faint(entry.text) })),
-        { label: c.muted('Voltar'), value: 'back' }
+        { label: c.muted(t('integration.back')), value: 'back' }
       ]
     });
     if (!choice || choice === 'back') return;
     const picked = entries.find((entry) => entry.value === choice);
-    if (picked) await copyAndShow(`API · ${picked.label}`, 'Copiado', picked.text);
+    if (picked) await copyAndShow('API · ' + picked.label, t('integration.copied'), picked.text);
   }
 }
 
 async function exportIntegrationFile(): Promise<void> {
   const file = path.join(appDir(), 'integracao.txt');
   const content = [
-    `AgentBridge NVIDIA - integracao (${baseUrl()})`,
-    `Chave local: ${localKey()}`,
+    t('export.title', { url: baseUrl() }),
+    t('export.localKey', { key: localKey() }),
     '',
-    '=== Codex CLI (~/.codex/config.toml) ===',
+    t('export.codexSection'),
     codexConfigToml(baseUrl()),
     '',
     '# bash / zsh',
@@ -994,13 +1044,13 @@ async function exportIntegrationFile(): Promise<void> {
     '# PowerShell',
     codexEnv(localKey(), 'powershell'),
     '',
-    '=== Claude Code (bash / zsh) ===',
+    t('export.claudeSectionBash'),
     claudeSnippet(baseUrl(), localKey(), 'bash'),
     '',
-    '=== Claude Code (PowerShell) ===',
+    t('export.claudeSectionPwsh'),
     claudeSnippet(baseUrl(), localKey(), 'powershell'),
     '',
-    '=== Endpoints ===',
+    t('export.endpointsSection'),
     `${baseUrl()}/v1/chat/completions`,
     `${baseUrl()}/v1/responses`,
     `${baseUrl()}/v1/messages`,
@@ -1008,7 +1058,7 @@ async function exportIntegrationFile(): Promise<void> {
   ].join('\n');
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, content, 'utf8');
-  await pause({ lines: sectionHeader('Exportado', '').concat('  ' + c.green('Arquivo salvo em:'), '  ' + c.faint(file)) });
+  await pause({ lines: sectionHeader(t('integration.exported'), '').concat('  ' + c.green(t('integration.exported')), '  ' + c.faint(file)) });
 }
 
 // ----------------------------------------------------------------------------
@@ -1027,12 +1077,12 @@ async function unlockFlow(): Promise<boolean> {
     while (true) {
       const password = await promptText({
         header: splash().concat(
-          ' ' + centerVisible(c.muted('Cofre local encontrado. Digite sua senha para descriptografar.'), innerWidth()),
+          ' ' + centerVisible(c.muted(t('vault.configFound')), innerWidth()),
           ''
         ),
-        label: 'Senha de criptografia',
+        label: t('vault.enterPassword'),
         mask: true,
-        footer: error ? '  ' + c.red(error) : c.faint('  Enter desbloquear · Esc sair'),
+        footer: error ? '  ' + c.red(error) : c.faint('  ' + t('vault.enterToUnlock')),
         validate: () => null
       });
       if (password === null) return false;
@@ -1040,6 +1090,8 @@ async function unlockFlow(): Promise<boolean> {
         unlockedConfig = unlockConfig(configPath(), password);
         sessionPassword = password;
         usageLog = [];
+        // Inicializa o i18n com o locale salvo (ou detecta do SO se ausente).
+        initLocale(unlockedConfig.locale);
         refreshRuntime();
         loadPenalties(unlockedConfig.apiKeys);
         proxyState = 'stopped';
@@ -1050,7 +1102,7 @@ async function unlockFlow(): Promise<boolean> {
         if (!localKeyStored(configPath())) await localKeyScreen(true);
         return true;
       } catch (e) {
-        error = e instanceof Error ? e.message : 'Senha incorreta.';
+        error = e instanceof Error ? e.message : t('vault.incorrectPassword');
       }
     }
   }
@@ -1058,33 +1110,35 @@ async function unlockFlow(): Promise<boolean> {
   // Primeira execucao: cria senha e segue para o cadastro de APIs.
   await pause({
     lines: splash().concat(
-      ' ' + centerVisible(c.amber('Nenhum cofre encontrado. Vamos criar um agora.'), innerWidth()),
-      ' ' + centerVisible(c.faint('A senha NUNCA e salva: ela so descriptografa as chaves nesta sessao.'), innerWidth())
+      ' ' + centerVisible(c.amber(t('vault.noConfig')), innerWidth()),
+      ' ' + centerVisible(c.faint(t('vault.passwordNeverStored')), innerWidth())
     ),
-    footer: c.faint('  Pressione qualquer tecla para comecar...')
+    footer: c.faint('  ' + t('nav.pressAnyKeyStart'))
   });
 
   while (true) {
     const password = await promptText({
-      header: sectionHeader('Criar cofre', 'Escolha uma senha forte para criptografar suas chaves.'),
-      label: 'Nova senha',
+      header: sectionHeader(t('vault.createVault'), t('vault.choosePassword')),
+      label: t('vault.newPassword'),
       mask: true,
-      validate: (v) => (v.trim().length >= 4 ? null : 'Use ao menos 4 caracteres.')
+      validate: (v) => (v.trim().length >= 4 ? null : t('vault.passwordTooShort'))
     });
     if (password === null) return false;
     const confirmPwd = await promptText({
-      header: sectionHeader('Criar cofre', 'Confirme a senha digitada.'),
-      label: 'Confirmar senha',
+      header: sectionHeader(t('vault.createVault'), t('vault.confirmPrompt')),
+      label: t('vault.confirmPassword'),
       mask: true
     });
     if (confirmPwd === null) return false;
     if (password !== confirmPwd) {
-      await pause({ lines: sectionHeader('Senhas diferentes', '').concat('  ' + c.red('As senhas nao conferem. Tente de novo.')) });
+      await pause({ lines: sectionHeader(t('vault.passwordMismatch'), '').concat('  ' + c.red(t('vault.tryAgain'))) });
       continue;
     }
     sessionPassword = password;
     unlockedConfig = freshConfig();
     clearRuntimeConfig();
+    // Inicializa o i18n via deteccao automatica do SO (config novo).
+    initLocale(null);
     proxyState = 'stopped';
     // Cofre novo: define a chave local antes de cadastrar as APIs.
     await localKeyScreen(true);
@@ -1128,6 +1182,18 @@ export async function runTui(): Promise<void> {
   };
   startInput(cleanup);
   wireRuntimeEvents();
+
+  // Carrega o locale salvo de locale.txt (se existir) para que a tela de
+  // desbloqueio apareca no idioma escolhido, antes de desbloquear o cofre.
+  try {
+    const lPath = localePath();
+    if (existsSync(lPath)) {
+      const saved = readFileSync(lPath, 'utf8').trim();
+      if (saved) initLocale(saved);
+    }
+  } catch {
+    // fallback: detecta do SO (ja e o padrao do initLocale).
+  }
 
   try {
     const unlocked = await unlockFlow();

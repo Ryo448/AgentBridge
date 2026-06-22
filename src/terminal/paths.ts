@@ -54,6 +54,10 @@ export function penaltiesPath(): string {
   return path.join(appDir(), 'penalties.json');
 }
 
+export function localePath(): string {
+  return path.join(appDir(), 'locale.txt');
+}
+
 // Impressao digital curta da chave (NAO o segredo) para casar o castigo salvo com
 // a chave certa mesmo que a ordem das APIs mude entre reinicios.
 function keyFingerprint(apiKey: string): string {

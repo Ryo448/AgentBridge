@@ -51,3 +51,7 @@ export const RATE_LIMIT_PENALTY_MS = 60 * 60_000;
 // abortamos um prefill saudavel: contextos grandes podem demorar bem mais que 120s
 // ate o primeiro token, e abortar so forcava o cliente a reenviar tudo de novo.
 export const FIRST_RESPONSE_TIMEOUT_MS = 600_000;
+
+// Idioma padrao da interface. Se nao houver config salva, a deteccao automatica
+// do SO decide; se a deteccao falhar, cai para 'en'.
+export const DEFAULT_LOCALE = 'en';

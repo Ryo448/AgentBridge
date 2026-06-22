@@ -12,6 +12,7 @@ import {
 import { responsesApi, anthropicMessagesApi } from './routes/compatibility.ts';
 import { withLocalToolInstructions } from './routes/toolInstructions.ts';
 import { forwardToNvidia } from './services/nvidia.ts';
+import { getLocale, initLocale, t } from './i18n/index.ts';
 import {
   getEffectiveModel,
   getLocalApiKey,
@@ -55,7 +56,7 @@ app.use('/v1/*', async (context, next) => {
     return context.json({
       error: {
         type: 'authentication_error',
-        message: 'Falha na autenticacao: chave local invalida ou ausente.'
+        message: t('api.authFailed')
       }
     }, 401);
   }
@@ -130,8 +131,7 @@ async function invokeChatDirect(body: Record<string, unknown>) {
   const requested = String(body.model || '').trim();
   if (!requested || requested === FIXED_CLIENT_MODEL) {
     const err: any = new Error(
-      `Informe um "model" real (ex.: ${DEFAULT_MODEL_CATALOG[0]?.model}). ` +
-      `Consulte GET /v1/models/available para a lista. Nao use "${FIXED_CLIENT_MODEL}" aqui.`
+      t('api.modelRequired', { example: DEFAULT_MODEL_CATALOG[0]?.model, fixed: FIXED_CLIENT_MODEL })
     );
     err.status = 400;
     throw err;
@@ -184,13 +184,13 @@ app.get('/v1/models', (context) => {
         created,
         owned_by: 'agentbridge',
         available: true,
-        label: 'AgentBridge (auto)',
+        label: t('api.autoLabel'),
         icon: ''
       }
     ],
     model_source: 'proxy',
     selected_model: getSelectedModel(),
-    message: `Escolha um id real para ir direto a ele, ou "${FIXED_CLIENT_MODEL}" para usar o modelo selecionado no app.`
+    message: t('api.catalogMessage', { fixed: FIXED_CLIENT_MODEL })
   });
 });
 
@@ -237,7 +237,7 @@ app.get('/v1/models/available', (context) => {
     data,
     model_source: 'catalog',
     selected_model: getSelectedModel(),
-    message: 'Envie o id real em POST /v1/direct/chat/completions (ou /v1/direct/responses, /v1/direct/messages) para ir direto a esse modelo.'
+    message: t('api.availableMessage')
   });
 });
 
@@ -258,7 +258,7 @@ app.post('/v1/direct/responses', (context) => responsesApi(context, invokeChatDi
 app.post('/v1/direct/messages', (context) => anthropicMessagesApi(context, invokeChatDirect));
 
 function formatStandaloneLog(event: ApiRequestLogEvent) {
-  const time = new Date(event.timestamp).toLocaleTimeString('pt-BR');
+  const time = new Date(event.timestamp).toLocaleTimeString(getLocale());
   const elapsed = event.elapsedMs === undefined ? '' : ` em ${event.elapsedMs}ms`;
   const attempt = event.attempt && event.maxAttempts
     ? ` tentativa ${event.attempt}/${event.maxAttempts}`
@@ -316,6 +316,9 @@ export async function startStandaloneServer() {
     port: Number(process.env.PORT) || DEFAULT_PORT,
     ...(localApiKey ? { localApiKey } : {})
   });
+
+  // Inicializa o i18n via deteccao automatica do SO (modo headless).
+  initLocale(null);
 
   const port = getRuntimeStatus().port;
   onApiRequestLog((event) => {

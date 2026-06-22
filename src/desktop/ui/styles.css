@@ -234,3 +234,21 @@ pre { min-height: 170px; margin: 0; padding: 16px 92px 16px 16px; overflow: auto
 .add-model-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .add-model-actions .button { min-height: 36px; padding: 0 16px; }
 #addModelButton { margin-top: 12px; }
+
+/* Modal de idioma */
+.locale-list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.locale-option {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); color: var(--text);
+  font-size: 14px; cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.locale-option:hover { border-color: var(--accent); }
+.locale-option.active { border-color: var(--accent); background: rgba(118,185,0,.08); }
+.locale-option .locale-flag { font-size: 20px; }
+.locale-option .locale-name { flex: 1; text-align: left; font-weight: 600; }
+.locale-option .locale-check { color: var(--accent); font-size: 14px; visibility: hidden; }
+.locale-option.active .locale-check { visibility: visible; }
+#localeButton { font-size: 16px; padding: 0 12px; line-height: 38px; }

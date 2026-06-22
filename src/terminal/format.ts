@@ -1,5 +1,6 @@
 import type { ApiRequestLogEvent } from '../services/runtime.ts';
 import { c } from './theme.ts';
+import { t } from '../i18n/index.ts';
 
 // Formatacoes de texto compartilhadas pelas telas (espelham renderer.js do
 // desktop): tempo decorrido, mensagem amigavel de cada evento de log, contagem
@@ -28,33 +29,33 @@ export function usageMessage(entry: ApiRequestLogEvent): string {
   const target = entry.path ? `${entry.method || ''} ${entry.path}`.trim() : '';
   switch (entry.type) {
     case 'received':
-      return c.muted(`Cliente chamou ${target}`);
+      return c.muted(t('log.clientCalled', { target }));
     case 'rejected':
-      return c.red(`Cliente rejeitado ${target} HTTP ${entry.status}: ${entry.message || 'chave invalida'}`);
+      return c.red(t('log.clientRejected', { target, status: String(entry.status), message: entry.message || t('log.invalidKey') }));
     case 'completed_client':
-      return c.green(`Cliente recebeu HTTP ${entry.status} ${target} em ${formatElapsed(entry.elapsedMs)}`);
+      return c.green(t('log.clientReceived', { target, status: String(entry.status), elapsed: formatElapsed(entry.elapsedMs) }));
     case 'failed_client':
-      return c.red(`Erro no proxy ${target}: ${entry.message || 'falha desconhecida'}`);
+      return c.red(t('log.proxyError', { target, message: entry.message || t('log.unknownError') }));
     case 'rate_limit_wait':
-      return c.amber(`Aguardando throttle de RPM por ${formatElapsed(entry.waitMs)}`);
+      return c.amber(t('log.rateLimitWait', { elapsed: formatElapsed(entry.waitMs) }));
     case 'delay':
-      return c.faint(`Esperando delay de ${formatElapsed(entry.delayMs)}`);
+      return c.faint(t('log.delayWait', { elapsed: formatElapsed(entry.delayMs) }));
     case 'called':
-      return c.text(`API ${entry.apiNumber} selecionada`);
+      return c.text(t('log.apiSelected', { number: String(entry.apiNumber) }));
     case 'started':
-      return c.text(`API ${entry.apiNumber} comecou a responder em ${formatElapsed(entry.elapsedMs)}${entry.model ? c.faint(` · ${entry.model}`) : ''}`);
+      return c.text(t('log.apiStarted', { number: String(entry.apiNumber), elapsed: formatElapsed(entry.elapsedMs), model: entry.model ? c.faint(t('log.modelPrefix', { model: entry.model })) : '' }));
     case 'completed':
-      return c.green(`API ${entry.apiNumber} respondeu em ${formatElapsed(entry.elapsedMs)}${Number(entry.totalTokens) > 0 ? `, ${entry.totalTokens} tokens` : ''}`);
+      return c.green(t('log.apiCompleted', { number: String(entry.apiNumber), elapsed: formatElapsed(entry.elapsedMs), tokens: Number(entry.totalTokens) > 0 ? t('log.apiTokens', { count: String(entry.totalTokens) }) : '' }));
     case 'upstream_error':
-      return c.red(`NVIDIA erro HTTP ${entry.status} na API ${entry.apiNumber}${entry.model ? ` (${entry.model})` : ''}: ${entry.message || 'sem detalhe'}`);
+      return c.red(t('log.upstreamError', { status: String(entry.status), number: String(entry.apiNumber), model: entry.model ? ' (' + entry.model + ')' : '', message: entry.message || t('log.noDetail') }));
     case 'cancelled':
-      return c.amber(`Stream cancelado na API ${entry.apiNumber}: ${entry.message || 'cliente desconectou'}`);
+      return c.amber(t('log.streamCancelled', { number: String(entry.apiNumber), message: entry.message || t('log.clientDisconnected') }));
     case 'model_switch':
-      return c.accentStrong(`Modelo trocado automaticamente${entry.message ? ` ${entry.message}` : ''} para ${entry.model || '?'}`);
+      return c.accentStrong(t('log.modelSwitch', { reason: entry.message ? ' ' + entry.message : '', model: entry.model || '?' }));
     case 'error':
-      return c.red(`Erro na API ${entry.apiNumber || '?'}: ${entry.message || 'sem detalhe'}`);
+      return c.red(t('log.apiError', { number: String(entry.apiNumber || '?'), message: entry.message || t('log.noDetail') }));
     default:
-      return c.text(`API ${entry.apiNumber} chamada`);
+      return c.text(t('log.apiCall', { number: String(entry.apiNumber) }));
   }
 }
 
