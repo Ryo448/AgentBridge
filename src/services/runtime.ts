@@ -1,6 +1,7 @@
 import {
   DEFAULT_MODEL,
   DEFAULT_PORT,
+  HEDGE_STICKY_REQUESTS,
   INTERNAL_API_KEY,
   NVIDIA_RPM_LIMIT,
   RATE_LIMIT_PENALTY_MS,
@@ -131,6 +132,11 @@ let modelPriority: string[] = [];
 let activeModel = DEFAULT_MODEL;
 let cursor = 0;
 let nextSendAt = 0;
+// Estado sticky do hedge: quando o backup vence porque o primario foi lento,
+// guardamos o modelo backup aqui e quantas requests ainda faltam para voltar
+// ao comportamento normal de prioridade.
+let hedgeStickyModel: string | undefined;
+let hedgeStickyRemaining = 0;
 const usageListeners = new Set<(event: ApiKeyUsageEvent) => void>();
 const requestLogListeners = new Set<(event: ApiRequestLogEvent) => void>();
 const penaltyListeners = new Set<(event: ApiKeyPenaltyEvent) => void>();
@@ -200,6 +206,7 @@ export function clearRuntimeConfig() {
   modelPriority = [];
   activeModel = DEFAULT_MODEL;
   localApiKey = INTERNAL_API_KEY;
+  clearHedgeSticky();
 }
 
 // Chave local exigida dos clientes. Sempre devolve algo nao vazio (cai para a
@@ -290,9 +297,16 @@ export function isModelAvailable(model: string, timestamp = Date.now()): boolean
 export function getEffectiveModel(timestamp = Date.now()): string {
   let chosen: string;
   if (autoToggle && modelPriority.length) {
-    chosen = pickAvailableModel([], timestamp)
-      || modelPriority[0]
-      || getSelectedModel();
+    // Sticky hedge: se um modelo backup venceu por lentidao, consumimos uma
+    // das requests sticky e usamos ele diretamente sem reavaliar prioridade.
+    const sticky = consumeHedgeStickyRequest();
+    if (sticky) {
+      chosen = sticky;
+    } else {
+      chosen = pickAvailableModel([], timestamp)
+        || modelPriority[0]
+        || getSelectedModel();
+    }
   } else {
     chosen = getSelectedModel();
   }
@@ -302,6 +316,40 @@ export function getEffectiveModel(timestamp = Date.now()): string {
     cursor = 0; // novo modelo: recomeca o rodizio de chaves a partir da primeira
   }
   return chosen;
+}
+
+// Ativa o sticky hedge: guarda o modelo backup que venceu e quantas requests
+// ele deve ficar ativo antes de tentar a prioridade normal de novo.
+export function setHedgeStickyModel(model: string) {
+  hedgeStickyModel = model;
+  hedgeStickyRemaining = HEDGE_STICKY_REQUESTS;
+}
+
+// Decrementa o contador sticky e retorna o modelo sticky se ainda ativo,
+// ou null se o periodo sticky ja terminou.
+export function consumeHedgeStickyRequest(): string | null {
+  if (hedgeStickyRemaining <= 0 || !hedgeStickyModel) {
+    hedgeStickyModel = undefined;
+    hedgeStickyRemaining = 0;
+    return null;
+  }
+  hedgeStickyRemaining--;
+  if (hedgeStickyRemaining <= 0) {
+    const model = hedgeStickyModel;
+    hedgeStickyModel = undefined;
+    return model;
+  }
+  return hedgeStickyModel;
+}
+
+export function getHedgeStickyRemaining(): number {
+  return hedgeStickyRemaining;
+}
+
+// Limpa o sticky (usado em clearRuntimeConfig e quando o usuario mexe na config).
+export function clearHedgeSticky() {
+  hedgeStickyModel = undefined;
+  hedgeStickyRemaining = 0;
 }
 
 // Modelo de redirecionamento atual (sempre devolve algo nao vazio).
@@ -453,6 +501,35 @@ export function markApiModelSwitch(input: {
     message: input.from
       ? `de ${input.from}${input.reason ? ` (${input.reason})` : ''}`
       : input.reason,
+    timestamp: input.timestamp ?? Date.now()
+  });
+}
+
+export function markHedgedModelSwitch(input: {
+  from: string;
+  to: string;
+  apiNumber?: number;
+  timestamp?: number;
+}) {
+  emitRequestLog({
+    type: 'model_switch',
+    apiNumber: input.apiNumber,
+    model: input.to,
+    message: `de ${input.from} (hedge: primario muito lento)`,
+    timestamp: input.timestamp ?? Date.now()
+  });
+  // Marca o modelo backup como sticky pelas proximas N requests.
+  setHedgeStickyModel(input.to);
+}
+
+export function markHedgeStickyEnd(input: {
+  from: string;
+  timestamp?: number;
+}) {
+  emitRequestLog({
+    type: 'model_switch',
+    model: input.from,
+    message: `sticky encerrado para ${input.from}, voltando a prioridade normal`,
     timestamp: input.timestamp ?? Date.now()
   });
 }

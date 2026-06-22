@@ -293,15 +293,29 @@ function dashboardLines(): string[] {
   const w = innerWidth();
   const colInner = Math.floor((w - 2) / 2);
 
+  // Le os tokens mais recentes para exibir no dashboard
+  const tokenUsage = readTokenUsage(tokenUsagePath());
+  const totalTokens = tokenUsage.totalInputTokens + tokenUsage.totalOutputTokens;
+  let totalSpent = 0;
+  // Calcula o custo total baseado nos precos do catalogo
+  for (const entry of unlockedConfig.modelCatalog) {
+    const data = tokenUsage.models[entry.model];
+    if (!data) continue;
+    const defPrices = DEFAULT_MODEL_PRICES[entry.model];
+    const inputPrice = typeof entry.inputPrice === 'number' && entry.inputPrice >= 0 ? entry.inputPrice : (defPrices?.input || 0);
+    const outputPrice = typeof entry.outputPrice === 'number' && entry.outputPrice >= 0 ? entry.outputPrice : (defPrices?.output || 0);
+    totalSpent += calcSavings(data.inputTokens, data.outputTokens, inputPrice, outputPrice);
+  }
+
   // Coluna esquerda: estado do proxy.
   const vaultLabel = sessionPassword ? c.green(t('vault.unlocked')) : c.faint(t('vault.locked'));
   const proxyRows = [
     field(t('dashboard.vault'), vaultLabel, 12),
-    field(t('dashboard.gateway'), statusBadge(proxyState), 12),
     field(t('dashboard.port'), c.text(String(unlockedConfig.port)), 12),
     field(t('dashboard.keys'), c.text(String(status.keyCount)), 12),
-    field(t('dashboard.delay'), c.text(`${unlockedConfig.requestDelayMs} ms`), 12),
-    field('RPM', `${c.text(`${status.requestsThisMinute}/${status.capacityPerMinute}`)}  ${bar(status.requestsThisMinute, status.capacityPerMinute || 1, Math.max(6, colInner - 22))}`, 12)
+    field(t('dashboard.spent'), c.text(formatUsd(totalSpent)), 12),
+    field(t('dashboard.tokens'), c.text(formatTokens(totalTokens)), 12),
+    field(t('dashboard.delay'), c.text(`${unlockedConfig.requestDelayMs} ms`), 12)
   ];
 
   // Coluna direita: modelo / redirecionamento.
@@ -336,7 +350,7 @@ function dashboardLines(): string[] {
     : [c.faint(t('dashboard.waitingRequest'))];
   // Preenche ate a altura fixa para a caixa nao "pular".
   while (logRows.length < logHeight) logRows.push('');
-  const rpm = c.accentStrong(`${status.requestsThisMinute}/${status.capacityPerMinute} RPM`);
+  const rpm = c.accentStrong(`${formatTokens(totalTokens)} Tokens`);
   lines.push(...box({
     title: t('dashboard.logTitle') + '   ' + rpm,
     lines: logRows,

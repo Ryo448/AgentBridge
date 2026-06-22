@@ -1,5 +1,7 @@
 import {
   FIRST_RESPONSE_TIMEOUT_MS,
+  HEDGE_SLOW_THRESHOLD_MS,
+  HEDGE_PRIMARY_GRACE_MS,
   NVIDIA_CHAT_URL
 } from '../config.ts';
 import {
@@ -9,6 +11,7 @@ import {
   markApiRateLimited,
   reserveSendSlot,
   markApiModelSwitch,
+  markHedgedModelSwitch,
   markApiRequestCancelled,
   markApiRequestError,
   markApiDelayWaiting,
@@ -23,18 +26,11 @@ export type NvidiaFetch = typeof fetch;
 
 type ForwardOptions = {
   firstResponseTimeoutMs?: number;
-  // Failover automatico de modelo. Quando TODAS as chaves estao de castigo (429)
-  // para o modelo atual ("nao tem para onde correr"), o proxy chama esta funcao
-  // com a lista de modelos ja esgotados e troca para o proximo modelo disponivel
-  // da lista de prioridades, sem devolver o 429 ao cliente. Retorna null quando
-  // nao sobra nenhum modelo elegivel. So e passado no modo de alternancia automatica.
   resolveModel?: (exhausted: string[]) => string | null;
-};
-
-type FirstChunk = {
-  response: Response;
-  reader: ReadableStreamDefaultReader<Uint8Array>;
-  value: Uint8Array;
+  enableHedge?: boolean;
+  // Sinal do cliente: quando o cliente cancela a request, este signal
+  // e abortado e o proxy cancela todas as requests ativas (primario + backup).
+  abortSignal?: AbortSignal;
 };
 
 type ToolCallDraft = {
@@ -139,36 +135,6 @@ function appendSseTextAndHasDone(state: { buffer: string; totalTokens?: number; 
       }
     }
   }
-}
-
-async function readFirstChunk(
-  fetchImpl: NvidiaFetch,
-  input: RequestInfo | URL,
-  init: RequestInit,
-  timeoutMs: number
-): Promise<FirstChunk> {
-  const controller = new AbortController();
-  const startedAt = Date.now();
-  const response = await withTimeout(fetchImpl(input, {
-    ...init,
-    signal: controller.signal
-  }), timeoutMs, () => controller.abort());
-
-  if (!response.ok || !response.body) {
-    return {
-      response,
-      reader: new ReadableStream<Uint8Array>().getReader(),
-      value: new Uint8Array()
-    };
-  }
-
-  const reader = response.body.getReader();
-  const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
-  const firstRead = await withTimeout(reader.read(), remainingMs, () => controller.abort());
-  if (firstRead.done || !firstRead.value) {
-    return { response, reader, value: new Uint8Array() };
-  }
-  return { response, reader, value: firstRead.value };
 }
 
 function streamWithLogs(input: {
@@ -356,6 +322,115 @@ async function readRemainingText(
   return text;
 }
 
+function buildUpstreamBody(body: Record<string, unknown>) {
+  return {
+    ...body,
+    stream: true,
+    stream_options: {
+      ...(body.stream_options && typeof body.stream_options === 'object'
+        ? body.stream_options as Record<string, unknown>
+        : {}),
+      include_usage: true
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ModelAttempt: estado de uma tentativa de fetch bem-sucedida (HTTP 200)
+// ---------------------------------------------------------------------------
+type ModelAttempt = {
+  model: string;
+  apiNumber: number;
+  response: Response;
+  reader: ReadableStreamDefaultReader<Uint8Array>;
+  firstChunk: Uint8Array;
+  abortController: AbortController;
+};
+
+// ---------------------------------------------------------------------------
+// makeSuccessResponse: monta a Response final (stream ou JSON)
+// ---------------------------------------------------------------------------
+async function makeSuccessResponse(
+  attempt: ModelAttempt,
+  requestStartedAt: number,
+  maxAttempts: number,
+  clientWantsStream: boolean
+): Promise<Response> {
+  if (clientWantsStream) {
+    const headers = cloneHeaders(attempt.response);
+    headers.set('content-type', 'text/event-stream');
+    return new Response(streamWithLogs({
+      firstChunk: attempt.firstChunk,
+      reader: attempt.reader,
+      apiNumber: attempt.apiNumber,
+      requestStartedAt,
+      attempt: 1,
+      maxAttempts,
+      model: attempt.model
+    }), {
+      status: attempt.response.status,
+      statusText: attempt.response.statusText,
+      headers
+    });
+  }
+
+  const text = await readRemainingText(attempt.firstChunk, attempt.reader);
+  const completion = aggregateChatCompletion(parseSseEvents(text));
+  const usageInfo = (completion as { usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } }).usage;
+  markApiResponseCompleted({
+    apiNumber: attempt.apiNumber,
+    requestStartedAt,
+    attempt: 1,
+    maxAttempts,
+    totalTokens: usageInfo?.total_tokens,
+    promptTokens: usageInfo?.prompt_tokens,
+    completionTokens: usageInfo?.completion_tokens,
+    model: attempt.model,
+    timestamp: Date.now()
+  });
+  return Response.json(completion, {
+    status: attempt.response.status,
+    statusText: attempt.response.statusText,
+    headers: { 'cache-control': 'no-store' }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Lê o primeiro chunk de um ReadableStream com timeout
+// ---------------------------------------------------------------------------
+async function readFirstChunk(
+  fetchImpl: NvidiaFetch,
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<{ response: Response; reader: ReadableStreamDefaultReader<Uint8Array>; value: Uint8Array }> {
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  const response = await withTimeout(fetchImpl(input, {
+    ...init,
+    signal: controller.signal
+  }), timeoutMs, () => controller.abort());
+
+  if (!response.ok || !response.body) {
+    return {
+      response,
+      reader: new ReadableStream<Uint8Array>().getReader(),
+      value: new Uint8Array()
+    };
+  }
+
+  const reader = response.body.getReader();
+  const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
+  const firstRead = await withTimeout(reader.read(), remainingMs, () => controller.abort());
+  if (firstRead.done || !firstRead.value) {
+    return { response, reader, value: new Uint8Array() };
+  }
+  return { response, reader, value: firstRead.value };
+}
+
+// ---------------------------------------------------------------------------
+// forwardToNvidia — ponto de entrada principal
+// ---------------------------------------------------------------------------
 export async function forwardToNvidia(
   body: Record<string, unknown>,
   fetchImpl: NvidiaFetch = fetch,
@@ -368,86 +443,65 @@ export async function forwardToNvidia(
   const now = rateLimitOptions.now || Date.now;
   const requestStartedAt = now();
   const maxAttempts = Math.max(1, getApiKeyCount());
-  // Modelo atual da request. Pode mudar no meio do caminho quando o failover
-  // automatico de modelo troca para o proximo da lista de prioridades.
   let activeModel = typeof body.model === 'string' ? body.model : undefined;
-  // Modelos ja esgotados (todas as chaves de castigo) nesta request, para o
-  // resolveModel nao devolver o mesmo de novo e o failover ser monotonico.
   const exhaustedModels: string[] = [];
   let apiNumber: number | undefined;
 
-  // Porteira de envio: prepara, espera o delay configurado e SO entao envia ao
-  // modelo. A espera e serializada (uma request por vez, espacadas em delayMs),
-  // de modo que o delay realmente reduz a taxa que chega na NVIDIA e o consumo de
-  // RPM -- em vez de apenas atrasar, em paralelo, um lote inteiro de requests.
   markApiDelayWaiting({ delayMs, timestamp: now() });
   await reserveSendSlot({ delayMs, now, sleep: rateLimitOptions.sleep });
 
-  // Failover SOMENTE em HTTP 429 (limite da chave). A mesma request e reenviada
-  // automaticamente para a proxima chave da lista, sem devolver o erro ao cliente.
-  // NAO ha failover em timeout ou erro de rede: reenviar o mesmo contexto gigante
-  // so pagaria o prefill de novo e empilharia minutos de espera ate um eventual 504,
-  // entao nesses casos devolvemos o erro e deixamos o cliente reenviar o turno.
   let attempt = 0;
   while (true) {
     attempt++;
     let acquired;
     try {
-      // O castigo de 429 e por modelo: passa o modelo da request para que uma chave
-      // de castigo em outro modelo continue elegivel para este.
       acquired = await acquireApiKey({ ...rateLimitOptions, model: activeModel });
     } catch (error: any) {
-      // Todas as chaves estao de castigo (429) para o modelo atual: nao ha para onde
-      // encaminhar NESTE modelo. No modo automatico, troca para o proximo modelo
-      // disponivel da lista de prioridades e segue, sem devolver o erro ao cliente.
       const resting = error?.code === 'all_resting';
       if (resting && options.resolveModel) {
         const previousModel = activeModel;
         if (activeModel) exhaustedModels.push(activeModel);
         const nextModel = options.resolveModel(exhaustedModels.slice());
         if (nextModel && !exhaustedModels.includes(nextModel)) {
-          markApiModelSwitch({
-            from: previousModel,
-            to: nextModel,
-            reason: 'todas as APIs em castigo 429',
-            timestamp: now()
-          });
+          markApiModelSwitch({ from: previousModel, to: nextModel, reason: 'todas as APIs em castigo 429', timestamp: now() });
           activeModel = nextModel;
           body = { ...body, model: nextModel };
-          attempt = 0; // modelo novo: o orcamento de tentativas por chave reinicia
+          attempt = 0;
           continue;
         }
       }
-      markApiRequestError({
-        apiNumber,
-        message: error?.message || String(error),
-        requestStartedAt,
-        attempt,
-        maxAttempts,
-        timestamp: now()
-      });
+      markApiRequestError({ apiNumber, message: error?.message || String(error), requestStartedAt, attempt, maxAttempts, timestamp: now() });
       return Response.json({
-        error: {
-          type: resting ? 'rate_limited' : 'upstream_timeout',
-          message: error?.message || 'Nenhuma API NVIDIA disponivel.'
-        }
+        error: { type: resting ? 'rate_limited' : 'upstream_timeout', message: error?.message || 'Nenhuma API NVIDIA disponivel.' }
       }, { status: resting ? 429 : 504 });
     }
     apiNumber = acquired.apiNumber;
 
+    const upstreamBody = buildUpstreamBody(body);
+
+    // ======================================================================
+    // Com hedge: usa race entre readFirstChunk e timer
+    // ======================================================================
+    if (options.enableHedge && options.resolveModel) {
+      // Se o cliente ja cancelou, nem comeca
+      if (options.abortSignal?.aborted) {
+        markApiRequestCancelled({ apiNumber, requestStartedAt, message: 'Cliente cancelou a request.', attempt, maxAttempts, timestamp: now() });
+        return new Response(null, { status: 499 });
+      }
+      const result = await hedgeForward(
+        body, activeModel!, fetchImpl, timeoutMs, rateLimitOptions,
+        attempt, maxAttempts, requestStartedAt, options.resolveModel,
+        upstreamBody, acquired, clientWantsStream, now, options.abortSignal
+      );
+      if (result) return result;
+      // undefined: erro 429 ou HTTP error que o loop externo pode tentar de novo
+      continue;
+    }
+
+    // ======================================================================
+    // Sem hedge: comportamento original
+    // ======================================================================
     try {
-      // Pede usage no stream (include_usage) para conseguirmos contar os tokens
-      // consumidos em cada request -- exibidos no log e no botao de teste.
-      const upstreamBody = {
-        ...body,
-        stream: true,
-        stream_options: {
-          ...(body.stream_options && typeof body.stream_options === 'object'
-            ? body.stream_options as Record<string, unknown>
-            : {}),
-          include_usage: true
-        }
-      };
       const { response, reader, value } = await readFirstChunk(fetchImpl, NVIDIA_CHAT_URL, {
         method: 'POST',
         headers: {
@@ -458,98 +512,29 @@ export async function forwardToNvidia(
         body: JSON.stringify(upstreamBody)
       }, timeoutMs);
 
-      markApiResponseStarted({
-        apiNumber,
-        requestStartedAt,
-        model: activeModel,
-        attempt,
-        maxAttempts,
-        timestamp: now()
-      });
+      markApiResponseStarted({ apiNumber, requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
 
-      // 429 e ainda ha chave seguinte: banca esta chave e tenta a proxima com a
-      // MESMA request, mantendo o fluxo do agente vivo.
       if (response.status === 429 && attempt < maxAttempts) {
-        markApiUpstreamError({
-          apiNumber,
-          status: 429,
-          message: response.statusText || 'Too Many Requests',
-          requestStartedAt,
-          model: activeModel,
-          attempt,
-          maxAttempts,
-          timestamp: now()
-        });
-        markApiRateLimited({
-          apiNumber,
-          model: activeModel,
-          retryAfterMs: parseRetryAfterMs(response),
-          timestamp: now()
-        });
-        markApiResponseCompleted({
-          apiNumber,
-          requestStartedAt,
-          attempt,
-          maxAttempts,
-          timestamp: now()
-        });
+        markApiUpstreamError({ apiNumber, status: 429, message: response.statusText || 'Too Many Requests', requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
+        markApiRateLimited({ apiNumber, model: activeModel, retryAfterMs: parseRetryAfterMs(response), timestamp: now() });
+        markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, timestamp: now() });
         await reader.cancel().catch(() => {});
         continue;
       }
 
       if (!response.ok) {
-        markApiUpstreamError({
-          apiNumber,
-          status: response.status,
-          message: response.statusText || `NVIDIA HTTP ${response.status}`,
-          requestStartedAt,
-          model: activeModel,
-          attempt,
-          maxAttempts,
-          timestamp: now()
-        });
-        // 429 na ultima chave disponivel: ainda assim coloca ela de castigo de 1h,
-        // para a proxima request ja nao tentar essa chave saturada.
-        if (response.status === 429) {
-          markApiRateLimited({
-            apiNumber,
-            model: activeModel,
-            retryAfterMs: parseRetryAfterMs(response),
-            timestamp: now()
-          });
-        }
-        markApiResponseCompleted({
-          apiNumber,
-          requestStartedAt,
-          attempt,
-          maxAttempts,
-          timestamp: now()
-        });
+        markApiUpstreamError({ apiNumber, status: response.status, message: response.statusText || `NVIDIA HTTP ${response.status}`, requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
+        if (response.status === 429) markApiRateLimited({ apiNumber, model: activeModel, retryAfterMs: parseRetryAfterMs(response), timestamp: now() });
+        markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, timestamp: now() });
         await reader.cancel().catch(() => {});
-        // Failover de modelo no modo automatico:
-        //  - 429: esta chave acabou de entrar em castigo, entao todas ficaram saturadas
-        //    neste modelo -> troca para o proximo da lista em vez de devolver 429.
-        //  - 400/404: a NVIDIA nao reconhece este modelo (id errado, modelo removido).
-        //    Como o erro e imediato (nao pagou prefill), tambem pula para o proximo
-        //    modelo em vez de quebrar a request do cliente.
-        const isModelFailover =
-          response.status === 429 ||
-          response.status === 400 ||
-          response.status === 404;
+
+        const isModelFailover = response.status === 429 || response.status === 400 || response.status === 404;
         if (isModelFailover && options.resolveModel) {
           const previousModel = activeModel;
           if (activeModel) exhaustedModels.push(activeModel);
           const nextModel = options.resolveModel(exhaustedModels.slice());
           if (nextModel && !exhaustedModels.includes(nextModel)) {
-            markApiModelSwitch({
-              from: previousModel,
-              to: nextModel,
-              apiNumber,
-              reason: response.status === 429
-                ? 'todas as APIs em castigo 429'
-                : `modelo recusado (HTTP ${response.status})`,
-              timestamp: now()
-            });
+            markApiModelSwitch({ from: previousModel, to: nextModel, apiNumber, reason: response.status === 429 ? 'todas as APIs em castigo 429' : `modelo recusado (HTTP ${response.status})`, timestamp: now() });
             activeModel = nextModel;
             body = { ...body, model: nextModel };
             attempt = 0;
@@ -559,71 +544,361 @@ export async function forwardToNvidia(
         return responseFromUpstream(response);
       }
 
-      // Resposta HTTP 200 da NVIDIA nesta (chave, modelo): conta +1 na contagem
-      // de 200 do par, que vira "200 ate dar 429" se essa chave levar 429 depois.
       markApiSuccess({ apiNumber, model: activeModel, timestamp: now() });
 
       if (clientWantsStream) {
         const headers = cloneHeaders(response);
         headers.set('content-type', 'text/event-stream');
         return new Response(streamWithLogs({
-          firstChunk: value,
-          reader,
-          apiNumber,
-          requestStartedAt,
-          attempt,
-          maxAttempts,
-          model: activeModel
-        }), {
-          status: response.status,
-          statusText: response.statusText,
-          headers
-        });
+          firstChunk: value, reader, apiNumber, requestStartedAt, attempt, maxAttempts, model: activeModel
+        }), { status: response.status, statusText: response.statusText, headers });
       }
 
       const text = await readRemainingText(value, reader);
       const completion = aggregateChatCompletion(parseSseEvents(text));
       const usageInfo = (completion as { usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } }).usage;
-      markApiResponseCompleted({
-        apiNumber,
-        requestStartedAt,
-        attempt,
-        maxAttempts,
-        totalTokens: usageInfo?.total_tokens,
-        promptTokens: usageInfo?.prompt_tokens,
-        completionTokens: usageInfo?.completion_tokens,
-        model: activeModel,
-        timestamp: now()
-      });
-      return Response.json(completion, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: { 'cache-control': 'no-store' }
-      });
+      markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, totalTokens: usageInfo?.total_tokens, promptTokens: usageInfo?.prompt_tokens, completionTokens: usageInfo?.completion_tokens, model: activeModel, timestamp: now() });
+      return Response.json(completion, { status: response.status, statusText: response.statusText, headers: { 'cache-control': 'no-store' } });
+
     } catch (error: any) {
-      markApiRequestError({
-        apiNumber,
-        message: error?.message || String(error),
-        requestStartedAt,
-        attempt,
-        maxAttempts,
-        timestamp: now()
-      });
+      markApiRequestError({ apiNumber, message: error?.message || String(error), requestStartedAt, attempt, maxAttempts, timestamp: now() });
       return Response.json({
-        error: {
-          type: 'upstream_timeout',
-          message: error?.message || 'A API NVIDIA nao iniciou resposta a tempo.'
-        }
+        error: { type: 'upstream_timeout', message: error?.message || 'A API NVIDIA nao iniciou resposta a tempo.' }
       }, { status: 504 });
     }
   }
 
-  // Inalcancavel na pratica (a ultima tentativa sempre retorna acima), mas mantido
-  // como rede de seguranca de tipo: todas as chaves responderam 429.
   return Response.json({
-    error: {
-      type: 'rate_limited',
-      message: 'Todas as APIs NVIDIA retornaram 429.'
-    }
+    error: { type: 'rate_limited', message: 'Todas as APIs NVIDIA retornaram 429.' }
   }, { status: 429 });
+}
+
+// ===========================================================================
+// hedgeForward: fluxo completo com hedge.
+//
+// 1. Dispara fetch HTTP do primario com timeout de 600s
+// 2. Timer de 60s corre em paralelo esperando o HTTP 200
+// 3. Se timer vencer → faz doFetch completo do backup
+// 4. Quando o backup responder (HTTP 200 + primeiro chunk) → grace period de 10s
+// 5. Se primario responder no grace → primario vence
+// 6. Se nao → backup vence, primario cancelado, sticky ativado
+// ===========================================================================
+async function hedgeForward(
+  body: Record<string, unknown>,
+  activeModel: string,
+  fetchImpl: NvidiaFetch,
+  timeoutMs: number,
+  rateLimitOptions: AcquireApiKeyOptions,
+  attempt: number,
+  maxAttempts: number,
+  requestStartedAt: number,
+  resolveModelFn: (exhausted: string[]) => string | null,
+  upstreamBody: Record<string, unknown>,
+  acquired: { apiKey: string; apiNumber: number },
+  clientWantsStream: boolean,
+  now: () => number,
+  clientAbortSignal?: AbortSignal
+): Promise<Response | undefined> {
+  const primaryApiNumber = acquired.apiNumber;
+  const primaryAbort = new AbortController();
+
+  // Helper: trata abort do cliente — aborta primario e/ou backup
+  let backupAbortForCleanup: AbortController | null = null;
+  const onClientAbort = () => {
+    primaryAbort.abort();
+    if (backupAbortForCleanup) backupAbortForCleanup.abort();
+  };
+  const abortListener = clientAbortSignal
+    ? () => { clientAbortSignal.addEventListener('abort', onClientAbort, { once: true }); }
+    : () => {};
+  abortListener();
+const cleanup = () => {
+    if (clientAbortSignal) clientAbortSignal.removeEventListener('abort', onClientAbort);
+  };
+  abortListener();
+
+  // Se o cliente ja cancelou, aborta tudo
+  if (clientAbortSignal?.aborted) {
+    primaryAbort.abort();
+    cleanup();
+    return undefined;
+  }
+  // Retorna {response, reader} ou null em caso de abort/timeout/erro
+  const primaryHttp = (async (): Promise<{ response: Response; reader: ReadableStreamDefaultReader<Uint8Array> } | null> => {
+    try {
+      const response = await withTimeout(fetchImpl(NVIDIA_CHAT_URL, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${acquired.apiKey}`,
+          'content-type': 'application/json',
+          accept: 'text/event-stream'
+        },
+        signal: primaryAbort.signal,
+        body: JSON.stringify(upstreamBody)
+      }), timeoutMs);
+      if (primaryAbort.signal.aborted) return null;
+      if (!response.body) return { response, reader: new ReadableStream<Uint8Array>().getReader() };
+      return { response, reader: response.body.getReader() };
+    } catch (error: any) {
+      if (error?.name === 'AbortError') return null;
+      return null;
+    }
+  })();
+
+  // Timer do hedge
+  const hedgeTimer = new Promise<'timeout'>((resolve) => {
+    setTimeout(() => resolve('timeout'), HEDGE_SLOW_THRESHOLD_MS);
+  });
+
+  // Race: HTTP do primario vs timer
+  const first = await Promise.race([
+    primaryHttp.then((r) => ({ type: 'primary' as const, result: r })),
+    hedgeTimer.then(() => ({ type: 'hedge' as const }))
+  ]);
+
+  // ---- Caso A: Primario respondeu HTTP (qualquer status) antes do timer ----
+  if (first.type === 'primary') {
+    const httpResult = first.result;
+    if (!httpResult) return undefined;
+
+    const { response, reader } = httpResult;
+
+    markApiResponseStarted({ apiNumber: primaryApiNumber, requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
+
+    // 429: coloca em castigo e retorna undefined pro loop tentar de novo
+    if (response.status === 429) {
+      markApiUpstreamError({ apiNumber: primaryApiNumber, status: 429, message: response.statusText || 'Too Many Requests', requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
+      markApiRateLimited({ apiNumber: primaryApiNumber, model: activeModel, retryAfterMs: parseRetryAfterMs(response), timestamp: now() });
+      markApiResponseCompleted({ apiNumber: primaryApiNumber, requestStartedAt, attempt, maxAttempts, timestamp: now() });
+      await reader.cancel().catch(() => {});
+      cleanup();
+      return undefined;
+    }
+
+    // Outro HTTP erro
+    if (!response.ok) {
+      markApiUpstreamError({ apiNumber: primaryApiNumber, status: response.status, message: response.statusText || `NVIDIA HTTP ${response.status}`, requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
+      if (response.status === 429) markApiRateLimited({ apiNumber: primaryApiNumber, model: activeModel, retryAfterMs: parseRetryAfterMs(response), timestamp: now() });
+      markApiResponseCompleted({ apiNumber: primaryApiNumber, requestStartedAt, attempt, maxAttempts, timestamp: now() });
+      await reader.cancel().catch(() => {});
+      cleanup();
+      return undefined; // loop externo tenta failover 400/404
+    }
+
+    // HTTP 200! Le o primeiro chunk
+    markApiSuccess({ apiNumber: primaryApiNumber, model: activeModel, timestamp: now() });
+
+    let firstChunk: Uint8Array;
+    try {
+      const readResult = await withTimeout(reader.read(), Math.max(1, Math.min(60_000, timeoutMs - (Date.now() - requestStartedAt))));
+      firstChunk = readResult.done ? new Uint8Array() : (readResult.value || new Uint8Array());
+    } catch {
+      firstChunk = new Uint8Array();
+    }
+
+    const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk, abortController: primaryAbort };
+    cleanup();
+    return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream);
+  }
+
+  // ---- Caso B: Hedge timeout! Primario nao respondeu HTTP em 60s ----
+  console.log(`[HEDGE] Primario (${activeModel}) sem HTTP 200 em ${HEDGE_SLOW_THRESHOLD_MS}ms. Disparando backup.`);
+
+  const backupModel = resolveModelFn([activeModel]);
+  if (!backupModel) {
+    console.log(`[HEDGE] Nenhum modelo backup. Aguardando primario.`);
+    cleanup();
+    const httpResult = await primaryHttp;
+    if (!httpResult) { cleanup(); return undefined; }
+    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now);
+  }
+  console.log(`[HEDGE] Backup modelo: ${backupModel}`);
+
+  // Se o cliente cancelou, aborta tudo
+  if (clientAbortSignal?.aborted) {
+    primaryAbort.abort();
+    if (clientAbortSignal) clientAbortSignal.removeEventListener('abort', onClientAbort);
+    return undefined;
+  }
+
+  // Dispara backup (doFetch completo: acquireApiKey + fetch + primeiro chunk)
+  const backupAbort = new AbortController();
+  backupAbortForCleanup = backupAbort;
+
+  const backupAttempt = await doFetchWithModel(
+    { ...body, model: backupModel }, backupModel,
+    fetchImpl, timeoutMs, rateLimitOptions, requestStartedAt, backupAbort
+  );
+
+  if (!backupAttempt) {
+    console.log(`[HEDGE] Backup falhou. Aguardando primario.`);
+    cleanup();
+    const httpResult = await primaryHttp;
+    if (!httpResult) { cleanup(); return undefined; }
+    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now);
+  }
+
+  // ---- Backup respondeu (HTTP 200 + primeiro chunk). Grace period. ----
+  console.log(`[HEDGE] Backup respondeu. Grace period de ${HEDGE_PRIMARY_GRACE_MS}ms...`);
+  const primaryLate = await Promise.race([
+    primaryHttp.then((r) => r),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), HEDGE_PRIMARY_GRACE_MS))
+  ]);
+
+  if (primaryLate) {
+    // Primario respondeu HTTP no grace period!
+    const { response, reader } = primaryLate;
+
+    // Se o primario deu erro, continua com backup!
+    if (!response.ok) {
+      console.log(`[HEDGE] Primario respondeu com HTTP ${response.status} no grace. Backup mantido.`);
+    } else {
+      // Primario deu HTTP 200. Le o primeiro chunk e ve se tem dados
+      console.log(`[HEDGE] Primario respondeu HTTP 200 no grace period.`);
+      markApiResponseStarted({ apiNumber: primaryApiNumber, requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
+      markApiSuccess({ apiNumber: primaryApiNumber, model: activeModel, timestamp: now() });
+
+      let primaryChunk: Uint8Array;
+      try {
+        const rr = await withTimeout(reader.read(), Math.min(60_000, timeoutMs - (Date.now() - requestStartedAt)));
+        primaryChunk = rr.done ? new Uint8Array() : (rr.value || new Uint8Array());
+      } catch {
+        primaryChunk = new Uint8Array();
+      }
+
+      // Primario tem dados: ele vence!
+      if (primaryChunk.length) {
+        console.log(`[HEDGE] Primario tem dados. Primario vence, backup cancelado.`);
+        backupAbort.abort();
+        await backupAttempt.reader.cancel().catch(() => {});
+        const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk: primaryChunk, abortController: primaryAbort };
+        cleanup();
+        return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream);
+      }
+
+      // Primario respondeu HTTP 200 mas chunk vazio — continua com backup
+      console.log(`[HEDGE] Primario HTTP 200 mas chunk vazio. Backup mantido.`);
+      await reader.cancel().catch(() => {});
+    }
+  }
+
+  // ---- Backup wins! ----
+  console.log(`[HEDGE] Backup venceu! Modelo ${backupAttempt.model} assumiu. Cancelando primario.`);
+  primaryAbort.abort();
+  try { await primaryHttp; } catch {}
+  cleanup();
+  markHedgedModelSwitch({ from: activeModel, to: backupAttempt.model, apiNumber: primaryApiNumber, timestamp: Date.now() });
+  return makeSuccessResponse(backupAttempt, requestStartedAt, maxAttempts, clientWantsStream);
+}
+
+// Processa o HTTP response do primario depois que ele respondeu
+async function processPrimaryHttp(
+  httpResult: { response: Response; reader: ReadableStreamDefaultReader<Uint8Array> },
+  body: Record<string, unknown>,
+  activeModel: string,
+  fetchImpl: NvidiaFetch,
+  timeoutMs: number,
+  rateLimitOptions: AcquireApiKeyOptions,
+  attempt: number,
+  maxAttempts: number,
+  requestStartedAt: number,
+  resolveModelFn: (exhausted: string[]) => string | null,
+  upstreamBody: Record<string, unknown>,
+  acquired: { apiKey: string; apiNumber: number },
+  clientWantsStream: boolean,
+  now: () => number
+): Promise<Response | undefined> {
+  const primaryApiNumber = acquired.apiNumber;
+  const { response, reader } = httpResult;
+
+  markApiResponseStarted({ apiNumber: primaryApiNumber, requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
+
+  if (response.status === 429 && attempt < maxAttempts) {
+    markApiUpstreamError({ apiNumber: primaryApiNumber, status: 429, message: response.statusText || 'Too Many Requests', requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
+    markApiRateLimited({ apiNumber: primaryApiNumber, model: activeModel, retryAfterMs: parseRetryAfterMs(response), timestamp: now() });
+    markApiResponseCompleted({ apiNumber: primaryApiNumber, requestStartedAt, attempt, maxAttempts, timestamp: now() });
+    await reader.cancel().catch(() => {});
+    return undefined;
+  }
+
+  if (!response.ok) {
+    markApiUpstreamError({ apiNumber: primaryApiNumber, status: response.status, message: response.statusText || `NVIDIA HTTP ${response.status}`, requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
+    if (response.status === 429) markApiRateLimited({ apiNumber: primaryApiNumber, model: activeModel, retryAfterMs: parseRetryAfterMs(response), timestamp: now() });
+    markApiResponseCompleted({ apiNumber: primaryApiNumber, requestStartedAt, attempt, maxAttempts, timestamp: now() });
+    await reader.cancel().catch(() => {});
+    return undefined;
+  }
+
+  markApiSuccess({ apiNumber: primaryApiNumber, model: activeModel, timestamp: now() });
+
+  let firstChunk: Uint8Array;
+  try {
+    const rr = await withTimeout(reader.read(), Math.min(60_000, timeoutMs - (Date.now() - requestStartedAt)));
+    firstChunk = rr.done ? new Uint8Array() : (rr.value || new Uint8Array());
+  } catch {
+    firstChunk = new Uint8Array();
+  }
+
+  const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk, abortController: new AbortController() };
+  return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream);
+}
+
+// doFetchWithModel: acquireApiKey + fetch + primeiro chunk, retorna null em erro
+async function doFetchWithModel(
+  body: Record<string, unknown>,
+  model: string,
+  fetchImpl: NvidiaFetch,
+  timeoutMs: number,
+  rateLimitOptions: AcquireApiKeyOptions,
+  requestStartedAt: number,
+  abortController: AbortController
+): Promise<ModelAttempt | null> {
+  let acquired;
+  try {
+    acquired = await acquireApiKey({ ...rateLimitOptions, model });
+  } catch {
+    return null;
+  }
+
+  const apiNumber = acquired.apiNumber;
+  const upstreamBody = buildUpstreamBody(body);
+
+  try {
+    const { response, reader, value } = await readFirstChunk(fetchImpl, NVIDIA_CHAT_URL, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${acquired.apiKey}`,
+        'content-type': 'application/json',
+        accept: 'text/event-stream'
+      },
+      signal: abortController.signal,
+      body: JSON.stringify(upstreamBody)
+    }, timeoutMs);
+
+    if (abortController.signal.aborted) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+
+    markApiResponseStarted({ apiNumber, requestStartedAt, model, attempt: 1, maxAttempts: 1, timestamp: Date.now() });
+
+    if (!response.ok) {
+      markApiUpstreamError({ apiNumber, status: response.status, message: response.statusText || `NVIDIA HTTP ${response.status}`, requestStartedAt, model, attempt: 1, maxAttempts: 1, timestamp: Date.now() });
+      if (response.status === 429) markApiRateLimited({ apiNumber, model, retryAfterMs: parseRetryAfterMs(response), timestamp: Date.now() });
+      markApiResponseCompleted({ apiNumber, requestStartedAt, attempt: 1, maxAttempts: 1, timestamp: Date.now() });
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+
+    markApiSuccess({ apiNumber, model, timestamp: Date.now() });
+
+    return { model, apiNumber, response, reader, firstChunk: value, abortController };
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      markApiRequestCancelled({ apiNumber, requestStartedAt, message: 'Request abortada (hedge)', attempt: 1, maxAttempts: 1, timestamp: Date.now() });
+    } else {
+      markApiRequestError({ apiNumber, message: error?.message || String(error), requestStartedAt, attempt: 1, maxAttempts: 1, timestamp: Date.now() });
+    }
+    return null;
+  }
 }

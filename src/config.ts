@@ -1,5 +1,5 @@
 export const APP_NAME = 'AgentBridge';
-export const APP_VERSION = '3.5.3';
+export const APP_VERSION = '4.0.0';
 export const INTERNAL_API_KEY = 'EuAmoORyo';
 export const DEFAULT_PORT = 3000;
 // Modelo NVIDIA padrao para onde o proxy redireciona qualquer chamada quando o
@@ -65,6 +65,19 @@ export const RATE_LIMIT_PENALTY_MS = 60 * 60_000;
 // abortamos um prefill saudavel: contextos grandes podem demorar bem mais que 120s
 // ate o primeiro token, e abortar so forcava o cliente a reenviar tudo de novo.
 export const FIRST_RESPONSE_TIMEOUT_MS = 600_000;
+
+// Tempo sem primeiro sinal de resposta (primeiro chunk/HTTP 200) antes de
+// lancar uma requisicao de backup (hedge) no proximo modelo da prioridade.
+// So ativo no modo automatico (autoToggle === true).
+export const HEDGE_SLOW_THRESHOLD_MS = 60_000;
+// Tempo extra que esperamos o primario responder DEPOIS que o backup ja
+// respondeu. Se o primario ainda nao respondeu neste prazo, cancela o
+// primario e fica com o backup.
+export const HEDGE_PRIMARY_GRACE_MS = 10_000;
+// Quantas requests o modelo backup fica "stickado" como ativo depois de
+// ter vencido o hedge (primario muito lento). Durante estas requests nao
+// tentamos o modelo de maior prioridade.
+export const HEDGE_STICKY_REQUESTS = 5;
 
 // Idioma padrao da interface. Se nao houver config salva, a deteccao automatica
 // do SO decide; se a deteccao falhar, cai para 'en'.

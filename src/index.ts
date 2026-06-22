@@ -131,7 +131,7 @@ app.use('/v1/*', async (context, next) => {
   }
 });
 
-async function invokeChat(body: Record<string, unknown>) {
+async function invokeChat(body: Record<string, unknown>, abortSignal?: AbortSignal) {
   // Roteamento de modelo (vale para /v1/chat/completions, /v1/responses e
   // /v1/messages):
   //   - model "AgentBridge" ou vazio -> REDIRECIONA para o modelo efetivo (modo
@@ -151,10 +151,15 @@ async function invokeChat(body: Record<string, unknown>) {
   // meio da request, o proxy troca para o proximo modelo disponivel da lista em
   // vez de erro. Sempre ativo quando o client pediu um modelo real; no modo
   // "AgentBridge" segue a regra antiga (so com alternancia automatica ligada).
-  const resolveModel = isPassthrough || isAutoToggleEnabled()
+  const isAuto = isAutoToggleEnabled();
+  const resolveModel = isPassthrough || isAuto
     ? (exhausted: string[]) => resolveAvailableModel(exhausted)
     : undefined;
-  return forwardToNvidia(withLocalToolInstructions(overridden), fetch, undefined, {}, { resolveModel });
+  // Hedged failover: so no modo automatico ("AgentBridge"). Quando o modelo
+  // primario demora > 60s para dar o primeiro sinal, dispara um backup no
+  // proximo modelo disponivel. Nunca ativo em modo manual ou passthrough.
+  const enableHedge = !isPassthrough && isAuto;
+  return forwardToNvidia(withLocalToolInstructions(overridden), fetch, undefined, {}, { resolveModel, enableHedge, abortSignal });
 }
 
 // Catalogo "real" de modelos que o gateway conhece: a uniao da lista de
@@ -248,13 +253,13 @@ app.get('/v1/models', (context) => {
 
 app.post('/v1/chat/completions', async (context) => {
   try {
-    return await invokeChat(await context.req.json<Record<string, unknown>>());
+    return await invokeChat(await context.req.json<Record<string, unknown>>(), context.req.raw.signal);
   } catch (error: any) {
     return context.json({ error: { type: 'proxy_error', message: error.message } }, 503);
   }
 });
-app.post('/v1/responses', (context) => responsesApi(context, invokeChat));
-app.post('/v1/messages', (context) => anthropicMessagesApi(context, invokeChat));
+app.post('/v1/responses', (context) => responsesApi(context, (body) => invokeChat(body, context.req.raw.signal)));
+app.post('/v1/messages', (context) => anthropicMessagesApi(context, (body) => invokeChat(body, context.req.raw.signal)));
 
 // ---------------------------------------------------------------------------
 // Rotas DIRETAS (isoladas). Nao alteram o comportamento das rotas acima: aqui o
