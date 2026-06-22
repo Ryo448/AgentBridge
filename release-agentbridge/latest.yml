@@ -1,8 +1,0 @@
-version: 3.5.3
-files:
-  - url: AgentBridge-Setup-3.5.3.exe
-    sha512: NWA94u51X4+ZRmO7/w9to521sy1CbHbom1zqA5Au2eQScYnm6c0d1Pc2nSmLI7s1YooxQkGBd5C/2ICIqUUuUg==
-    size: 94446779
-path: AgentBridge-Setup-3.5.3.exe
-sha512: NWA94u51X4+ZRmO7/w9to521sy1CbHbom1zqA5Au2eQScYnm6c0d1Pc2nSmLI7s1YooxQkGBd5C/2ICIqUUuUg==
-releaseDate: '2026-06-22T13:30:12.841Z'
