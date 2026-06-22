@@ -12,6 +12,7 @@ import {
   DEFAULT_LOCALE,
   DEFAULT_MODEL,
   DEFAULT_MODEL_CATALOG,
+  DEFAULT_MODEL_PRICES,
   DEFAULT_MODEL_PRIORITY,
   INTERNAL_API_KEY,
   REQUEST_DELAY_MS,
@@ -25,7 +26,7 @@ type CipherText = {
 };
 
 export type EncryptedConfig = {
-  version: 1;
+  version: 1 | 2;
   port: number;
   requestDelayMs?: number;
   rateLimitMode?: 'smooth';
@@ -77,10 +78,17 @@ function normalizeCatalog(value: unknown): ModelCatalogEntry[] {
     const model = String(entry.model || '').trim();
     if (!model || seen.has(model)) continue;
     seen.add(model);
+    const defPrices = DEFAULT_MODEL_PRICES[model];
     catalog.push({
       model,
       label: String(entry.label || '').trim() || model,
-      icon: String(entry.icon || '').trim()
+      icon: String(entry.icon || '').trim(),
+      inputPrice: typeof entry.inputPrice === 'number' && Number.isFinite(entry.inputPrice) && entry.inputPrice >= 0
+        ? entry.inputPrice
+        : (defPrices ? defPrices.input : undefined),
+      outputPrice: typeof entry.outputPrice === 'number' && Number.isFinite(entry.outputPrice) && entry.outputPrice >= 0
+        ? entry.outputPrice
+        : (defPrices ? defPrices.output : undefined)
     });
   }
   return catalog.length ? catalog : DEFAULT_MODEL_CATALOG.map((item) => ({ ...item }));
@@ -142,7 +150,7 @@ export function configExists(filePath: string) {
 
 export function unlockConfig(filePath: string, password: string): UnlockedConfig {
   const stored = JSON.parse(readFileSync(filePath, 'utf8')) as EncryptedConfig;
-  if (stored.version !== 1) throw new Error('Versao de configuracao nao suportada.');
+  if (stored.version !== 1 && stored.version !== 2) throw new Error('Versao de configuracao nao suportada.');
 
   const key = deriveKey(password, Buffer.from(stored.salt, 'base64'));
   const verifier = Buffer.from(decryptValue(stored.verifier, key));
@@ -203,7 +211,7 @@ export function saveConfig(
   const key = deriveKey(password, salt);
   const modelCatalog = normalizeCatalog(config.modelCatalog);
   const stored: EncryptedConfig = {
-    version: 1,
+    version: 2,
     port: config.port,
     requestDelayMs: normalizeRequestDelayMs(config.requestDelayMs),
     rateLimitMode: 'smooth',

@@ -15,7 +15,8 @@ import {
   INTERNAL_API_KEY,
   NVIDIA_RPM_LIMIT,
   REQUEST_DELAY_MS,
-  type ModelCatalogEntry
+  type ModelCatalogEntry,
+  DEFAULT_MODEL_PRICES
 } from '../config.ts';
 import {
   configExists,
@@ -78,6 +79,7 @@ import {
   usageMessage
 } from './format.ts';
 import { copyToClipboard } from './clipboard.ts';
+import { readTokenUsage, flushTokenUsage } from '../services/token-tracking.ts';
 
 // ----------------------------------------------------------------------------
 // Estado da sessao (espelha o que o main.ts do Electron mantem em memoria).
@@ -367,6 +369,7 @@ function hotkeyBar(penaltyCount: number): string {
     proxyServer ? c.accent('S') + c.faint(' ' + t('hotkey.stop')) : key('S', t('hotkey.start')),
     key('A', t('hotkey.apis')),
     key('M', t('hotkey.models')),
+    key('B', t('hotkey.tokens')),
     castigo,
     key('P', t('hotkey.port')),
     key('D', t('hotkey.delay')),
@@ -396,7 +399,7 @@ async function dashboardLoop(): Promise<void> {
       setKeyHandler((keyEvent) => {
         const key = (keyEvent.str || '').toLowerCase();
         const map: Record<string, string> = {
-          s: 'toggle', a: 'apis', m: 'models', c: 'penalties',
+          s: 'toggle', a: 'apis', m: 'models', c: 'penalties', b: 'tokens',
           p: 'port', d: 'delay', k: 'localkey', i: 'integration', t: 'locale', l: 'clear', q: 'quit'
         };
         const resolved = map[key];
@@ -429,6 +432,7 @@ async function handleAction(action: string): Promise<void> {
         break;
       case 'apis': await apisScreen(); break;
       case 'models': await modelsScreen(); break;
+      case 'tokens': await tokensScreen(); break;
       case 'penalties': await penaltiesScreen(); break;
       case 'port': await portScreen(); break;
       case 'delay': await delayScreen(); break;
@@ -607,6 +611,7 @@ async function modelActionScreen(model: string): Promise<void> {
       { label: t('models.moveUp'), value: 'up', disabled: idx <= 0 },
       { label: t('models.moveDown'), value: 'down', disabled: idx < 0 || idx >= unlockedConfig.modelPriority.length - 1 },
       { label: t('models.edit'), value: 'edit' },
+      { label: t('pricing.edit'), value: 'pricing' },
       { label: c.red(t('models.removeCatalog')), value: 'remove', disabled: unlockedConfig.modelCatalog.length <= 1 },
       { label: c.muted(t('models.back')), value: 'back' }
     ]
@@ -634,6 +639,9 @@ async function modelActionScreen(model: string): Promise<void> {
     }
     case 'edit':
       await editModelScreen(model);
+      break;
+    case 'pricing':
+      await pricingScreen(model);
       break;
     case 'remove': {
       unlockedConfig.modelCatalog = unlockedConfig.modelCatalog.filter((item) => item.model !== model);
@@ -930,6 +938,145 @@ async function localeScreen(): Promise<void> {
 }
 
 // ----------------------------------------------------------------------------
+// Helpers: Tokens e economia.
+// ----------------------------------------------------------------------------
+function tokenUsagePath(): string {
+  return path.join(appDir(), 'used_tokens.json');
+}
+
+const MILLION = 1_000_000;
+
+function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < MILLION) return (n / 1000).toFixed(1) + 'K';
+  return (n / MILLION).toFixed(2) + 'M';
+}
+
+function formatUsd(n: number): string {
+  return '$' + n.toFixed(4);
+}
+
+function calcSavings(inputTokens: number, outputTokens: number, inputPrice: number, outputPrice: number): number {
+  return (inputTokens / MILLION) * inputPrice + (outputTokens / MILLION) * outputPrice;
+}
+
+// ----------------------------------------------------------------------------
+// Tela: Tokens e economia (hotkey B).
+// ----------------------------------------------------------------------------
+async function tokensScreen(): Promise<void> {
+  flushTokenUsage(tokenUsagePath());
+  const usage = readTokenUsage(tokenUsagePath());
+  const entries = unlockedConfig.modelCatalog;
+
+  if (!usage.models || !Object.keys(usage.models).length) {
+    await pause({
+      lines: sectionHeader(t('tokens.title'), '').concat(
+        '',
+        '  ' + c.faint(t('tokens.noData')),
+        ''
+      )
+    });
+    return;
+  }
+
+  let totalSavings = 0;
+  const lines: string[] = [];
+  for (const entry of entries) {
+    const data = usage.models[entry.model];
+    if (!data) continue;
+    const defPrices = DEFAULT_MODEL_PRICES[entry.model];
+    const inputPrice = typeof entry.inputPrice === 'number' && entry.inputPrice >= 0
+      ? entry.inputPrice
+      : (defPrices ? defPrices.input : 0);
+    const outputPrice = typeof entry.outputPrice === 'number' && entry.outputPrice >= 0
+      ? entry.outputPrice
+      : (defPrices ? defPrices.output : 0);
+    const savings = calcSavings(data.inputTokens, data.outputTokens, inputPrice, outputPrice);
+    totalSavings += savings;
+    const label = c.accent(entry.label);
+    const calls = c.faint(`${data.totalCalls} ${t('tokens.calls')}`);
+    const totalT = c.text(`${formatTokens(data.inputTokens + data.outputTokens)} tok`);
+    const cost = c.green(formatUsd(savings));
+    const left = padEndVisible(label, 22);
+    const mid = padEndVisible(calls + '  ' + totalT, 30);
+    lines.push('  ' + left + mid + cost);
+  }
+
+  const totalTokens = usage.totalInputTokens + usage.totalOutputTokens;
+  const recentTokens = usage.recentTotalInputTokens + usage.recentTotalOutputTokens;
+
+  const header = sectionHeader(
+    t('tokens.title'),
+    t('tokens.subtitle', {
+      total: formatTokens(totalTokens),
+      recent: formatTokens(recentTokens),
+      savings: formatUsd(totalSavings)
+    })
+  );
+
+  const w = innerWidth();
+  lines.unshift('');
+  const body = box({
+    title: t('tokens.perModel'),
+    lines,
+    innerWidth: w,
+    color: c.faint,
+    titleColor: c.accent
+  });
+
+  await pause({
+    lines: header.concat(
+      body.map((l) => ' ' + l),
+      '',
+      '  ' + c.green(t('tokens.totalSavings', { savings: formatUsd(totalSavings) }))
+    )
+  });
+}
+
+// ----------------------------------------------------------------------------
+// Tela: Configurar precos de modelo.
+// ----------------------------------------------------------------------------
+async function pricingScreen(model: string): Promise<void> {
+  const entry = unlockedConfig.modelCatalog.find((m) => m.model === model);
+  if (!entry) return;
+
+  const prices = DEFAULT_MODEL_PRICES[entry.model] || { input: 0, output: 0 };
+  const curInput = typeof entry.inputPrice === 'number' ? entry.inputPrice : prices.input;
+  const curOutput = typeof entry.outputPrice === 'number' ? entry.outputPrice : prices.output;
+
+  const inputValue = await promptText({
+    header: sectionHeader(t('pricing.title', { model: entry.label }), ''),
+    label: t('pricing.inputPrice'),
+    initial: String(curInput),
+    validate: (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? null : t('pricing.invalid');
+    }
+  });
+  if (inputValue === null) return;
+
+  const outputValue = await promptText({
+    header: sectionHeader(t('pricing.title', { model: entry.label }), ''),
+    label: t('pricing.outputPrice'),
+    initial: String(curOutput),
+    validate: (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? null : t('pricing.invalid');
+    }
+  });
+  if (outputValue === null) return;
+
+  entry.inputPrice = Number(inputValue);
+  entry.outputPrice = Number(outputValue);
+  persistToDisk();
+  await pause({
+    lines: sectionHeader(t('pricing.title', { model: entry.label }), '').concat(
+      '  ' + c.green(t('pricing.saved'))
+    )
+  });
+}
+
+// ----------------------------------------------------------------------------
 // Tela: Integracao (snippets Codex / Claude / API direta).
 // ----------------------------------------------------------------------------
 async function integrationScreen(): Promise<void> {
@@ -1174,6 +1321,7 @@ export async function runTui(): Promise<void> {
   const cleanup = () => {
     if (exiting) return;
     exiting = true;
+    flushTokenUsage(tokenUsagePath());
     proxyServer?.close();
     clearRuntimeConfig();
     stopInput();

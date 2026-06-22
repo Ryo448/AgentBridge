@@ -2,6 +2,8 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { homedir } from 'node:os';
 import {
   DEFAULT_MODEL_CATALOG,
   DEFAULT_PORT,
@@ -9,6 +11,7 @@ import {
   NVIDIA_RPM_LIMIT,
   RATE_LIMIT_WINDOW_MS
 } from './config.ts';
+import { recordTokenUsage, readTokenUsage, flushTokenUsage } from './services/token-tracking.ts';
 import { responsesApi, anthropicMessagesApi } from './routes/compatibility.ts';
 import { withLocalToolInstructions } from './routes/toolInstructions.ts';
 import { forwardToNvidia } from './services/nvidia.ts';
@@ -34,6 +37,55 @@ import {
 export const app = new Hono();
 
 app.use('*', cors());
+
+function tokenUsagePath() {
+  const home = homedir();
+  const documents = process.platform === 'win32'
+    ? path.join(process.env.USERPROFILE || home, 'Documents')
+    : path.join(home, 'Documents');
+  return path.join(documents, 'AgentBridge', 'used_tokens.json');
+}
+
+// Listener global: registra tokens consumidos em cada chamada completada.
+onApiRequestLog((event) => {
+  if (event.type === 'completed' && event.model) {
+    let promptTokens = event.promptTokens || 0;
+    let completionTokens = event.completionTokens || 0;
+    const total = event.totalTokens || 0;
+    // Fallback: se a NVIDIA nao discriminar prompt/completion mas tivermos
+    // total_tokens, divide 50/50 como estimativa razoavel.
+    if (total > 0 && promptTokens === 0 && completionTokens === 0) {
+      promptTokens = Math.floor(total * 0.3);
+      completionTokens = total - promptTokens;
+    }
+    if (promptTokens > 0 || completionTokens > 0) {
+      recordTokenUsage(tokenUsagePath(), event.model, promptTokens, completionTokens);
+    }
+  }
+});
+
+// Rotas publicas (sem autenticacao de chave local).
+app.get('/health', (context) => {
+  const runtime = getRuntimeStatus();
+  return context.json({
+    status: runtime.unlocked ? 'ok' : 'locked',
+    provider: 'NVIDIA',
+    model_source: 'request',
+    api_keys: runtime.keyCount,
+    delay_ms: runtime.requestDelayMs,
+    rpm_limit_per_key: NVIDIA_RPM_LIMIT,
+    rate_limit_window_ms: RATE_LIMIT_WINDOW_MS,
+    requests_this_minute: runtime.requestsThisMinute,
+    capacity_per_minute: runtime.capacityPerMinute,
+    protocols: ['openai-responses', 'openai-chat-completions', 'anthropic-messages']
+  });
+});
+
+app.get('/v1/tokens/usage', (context) => {
+  flushTokenUsage(tokenUsagePath());
+  return context.json(readTokenUsage(tokenUsagePath()));
+});
+
 app.use('/v1/*', async (context, next) => {
   const requestStartedAt = Date.now();
   const method = context.req.method;

@@ -14,7 +14,7 @@
           <div>
             <div class="brand-line">
               <h1>AgentBridge</h1>
-              <span id="appVersion" class="version">v3.5.0</span>
+              <span id="appVersion" class="version">v3.5.3</span>
             </div>
             <p data-i18n="electron.brand.description">NVIDIA inference gateway</p>
           </div>
@@ -82,6 +82,7 @@
           <button id="startButton" class="button secondary" type="button" data-i18n="electron.startGateway">Iniciar gateway</button>
           <button id="stopButton" class="button ghost" type="button" data-i18n="electron.stop">Parar</button>
           <button id="penaltyButton" class="button ghost" type="button"><span data-i18n="electron.penalizedApis">APIs em castigo</span> <span id="penaltyBadge" class="penalty-badge hidden">0</span></button>
+          <button id="tokenButton" class="button ghost" type="button" data-i18n="electron.tokens">Tokens & Savings</button>
           <button id="localeButton" class="button ghost" type="button" title="Idioma / Language">🌐</button>
         </section>
 
@@ -247,7 +248,38 @@
       </div>
     </div>
 
+    <div id="pricingModal" class="modal-backdrop hidden">
+      <div class="modal-card compact">
+        <div class="modal-heading">
+          <div><span class="kicker" data-i18n="electron.pricingModal">PRICING</span><h2 data-i18n="electron.pricingTitle">Price per 1M tokens</h2></div>
+          <button id="closePricingButton" class="close-button" type="button">Fechar</button>
+        </div>
+        <p id="pricingModelLabel" class="pricing-model-name"></p>
+        <label class="field-label" for="pricingInputInput" data-i18n="electron.pricingInput">Preco por 1M tokens de input (USD)</label>
+        <input id="pricingInputInput" type="number" step="0.001" min="0" placeholder="0.000" autocomplete="off" />
+        <label class="field-label" for="pricingOutputInput" data-i18n="electron.pricingOutput">Preco por 1M tokens de output (USD)</label>
+        <input id="pricingOutputInput" type="number" step="0.001" min="0" placeholder="0.000" autocomplete="off" />
+        <div class="add-model-actions">
+          <button id="cancelPricingButton" type="button" class="button ghost" data-i18n="electron.cancel">Cancelar</button>
+          <button id="savePricingButton" type="button" class="button primary" data-i18n="electron.save">Salvar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="tokenModal" class="modal-backdrop hidden">
+      <div class="modal-card compact">
+        <div class="modal-heading">
+          <div><span class="kicker" data-i18n="electron.tokenModal">TOKENS</span><h2 data-i18n="electron.tokenTitle">Tokens & Savings</h2></div>
+          <button id="closeTokenButton" class="close-button" type="button">Fechar</button>
+        </div>
+        <div id="tokenSummary" class="token-summary"></div>
+        <div id="tokenModelList" class="token-model-list"></div>
+        <div id="tokenTotalSavings" class="token-total-savings"></div>
+      </div>
+    </div>
+
     <script src="./model-icons.js"></script>
+    <script>window.agentBridgeDefaultPrices = {"deepseek-ai/deepseek-v4-pro":{"input":0.435,"output":0.87},"deepseek-ai/deepseek-v4-flash":{"input":0.09,"output":0.18},"moonshotai/kimi-k2.6":{"input":0.66,"output":3.50},"nvidia/nemotron-3-ultra-550b-a55b":{"input":0.50,"output":2.20},"minimaxai/minimax-m3":{"input":0.30,"output":1.20},"qwen/qwen3.5-397b-a17b":{"input":0.385,"output":2.45}};</script>
     <script src="./renderer.js"></script>
   </body>
 </html>

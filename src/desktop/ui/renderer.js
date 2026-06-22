@@ -20,7 +20,7 @@ const previewStatus = {
     ? window.agentBridgeModels.map((item) => item.model)
     : [],
   provider: 'NVIDIA',
-  appVersion: '3.5.0',
+  appVersion: '3.5.3',
   apiKey: 'EuAmoORyo',
   needLocalKey: false,
   codexBaseUrl: 'http://localhost:3000/v1',
@@ -90,6 +90,9 @@ const elements = Object.fromEntries([
   'autoToggleSwitch', 'autoToggleHint', 'selectModeHint', 'addModelButton', 'addModelForm',
   'addModelName', 'addModelId', 'addModelError', 'cancelAddModelButton',
   'localeButton', 'localeModal', 'closeLocaleButton', 'localeList', 'localeSourceHint',
+  'tokenButton', 'tokenModal', 'closeTokenButton', 'tokenSummary', 'tokenModelList', 'tokenTotalSavings',
+  'pricingModal', 'closePricingButton', 'pricingInputInput', 'pricingOutputInput', 'pricingModelLabel',
+  'savePricingButton', 'cancelPricingButton',
   'messageText'
 ].map((id) => [id, byId(id)]));
 
@@ -673,7 +676,15 @@ function buildModelGrid(status) {
     edit.type = 'button';
     edit.className = 'model-edit';
     edit.textContent = t('electron.edit');
-    actions.append(test, edit);
+
+    const pricing = document.createElement('button');
+    pricing.type = 'button';
+    pricing.className = 'model-pricing';
+    pricing.textContent = '$';
+    pricing.title = t('electron.pricing');
+    pricing.addEventListener('click', () => openPricingModal(entry, status));
+
+    actions.append(test, edit, pricing);
     if (canRemove) {
       const remove = document.createElement('button');
       remove.type = 'button';
@@ -1004,6 +1015,145 @@ if (elements.localeButton) {
 if (elements.closeLocaleButton) {
   elements.closeLocaleButton.addEventListener('click', () => elements.localeModal.classList.add('hidden'));
 }
+
+// --- Modal de pricing ---
+let pricingModelId = null;
+
+function openPricingModal(entry, status) {
+  pricingModelId = entry.model;
+  elements.pricingModelLabel.textContent = entry.label + ' (' + entry.model + ')';
+  const curInput = entry.inputPrice != null ? entry.inputPrice : 0;
+  const curOutput = entry.outputPrice != null ? entry.outputPrice : 0;
+  elements.pricingInputInput.value = curInput;
+  elements.pricingOutputInput.value = curOutput;
+  elements.pricingModal.classList.remove('hidden');
+}
+
+elements.closePricingButton.addEventListener('click', () => {
+  elements.pricingModal.classList.add('hidden');
+  pricingModelId = null;
+});
+
+elements.cancelPricingButton.addEventListener('click', () => {
+  elements.pricingModal.classList.add('hidden');
+  pricingModelId = null;
+});
+
+elements.savePricingButton.addEventListener('click', async () => {
+  if (!pricingModelId) return;
+  const inputPrice = Number(elements.pricingInputInput.value);
+  const outputPrice = Number(elements.pricingOutputInput.value);
+  if (!Number.isFinite(inputPrice) || inputPrice < 0 || !Number.isFinite(outputPrice) || outputPrice < 0) return;
+
+  const status = lastStatus;
+  const catalog = catalogOf(status).map((entry) => {
+    if (entry.model === pricingModelId) {
+      return { ...entry, inputPrice, outputPrice };
+    }
+    return entry;
+  });
+  const priority = priorityOf(status);
+  try {
+    const newStatus = await bridge.updateModels({ catalog, priority });
+    renderStatus(newStatus || status);
+  } catch (e) {
+    // ignore
+  }
+  elements.pricingModal.classList.add('hidden');
+  pricingModelId = null;
+});
+
+// --- Modal de tokens e economia ---
+function openTokenModal() {
+  const status = lastStatus;
+  if (!status || !status.unlocked) return;
+
+  fetch(status.codexBaseUrl.replace("/v1", "") + "/v1/tokens/usage")
+    .then((res) => res.json())
+    .then((usage) => {
+      const models = usage.models || {};
+      const entries = catalogOf(status);
+      const MILLION = 1000000;
+
+      function fmt(n) {
+        if (n < 1000) return String(n);
+        if (n < MILLION) return (n / 1000).toFixed(1) + "K";
+        return (n / MILLION).toFixed(2) + "M";
+      }
+      function usd(n) { return "$" + n.toFixed(4); }
+
+      let totalSavings = 0;
+      const rows = [];
+
+      entries.forEach((entry) => {
+        const data = models[entry.model];
+        if (!data) return;
+        const def = window.agentBridgeDefaultPrices ? window.agentBridgeDefaultPrices[entry.model] : null;
+        const ip = typeof entry.inputPrice === "number" && entry.inputPrice >= 0
+          ? entry.inputPrice : (def ? def.input : 0);
+        const op = typeof entry.outputPrice === "number" && entry.outputPrice >= 0
+          ? entry.outputPrice : (def ? def.output : 0);
+        const savings = (data.inputTokens / MILLION) * ip + (data.outputTokens / MILLION) * op;
+        totalSavings += savings;
+        rows.push({
+          label: entry.label,
+          icon: entry.icon,
+          calls: data.totalCalls,
+          input: data.inputTokens,
+          output: data.outputTokens,
+          total: data.inputTokens + data.outputTokens,
+          savings: savings
+        });
+      });
+
+      const totalTokens = usage.totalInputTokens + usage.totalOutputTokens;
+      const recent = (usage.recentTotalInputTokens || 0) + (usage.recentTotalOutputTokens || 0);
+
+// Summary cards
+      elements.tokenSummary.innerHTML =
+        '<div class="token-summary-row">' +
+          '<div class="token-stat"><span class="token-stat-value">' + fmt(totalTokens) + '</span><span class="token-stat-label">' + t('electron.total') + '</span></div>' +
+          '<div class="token-stat"><span class="token-stat-value">' + fmt(recent) + '</span><span class="token-stat-label">' + t('electron.last30min') + '</span></div>' +
+          '<div class="token-stat highlight"><span class="token-stat-value">' + usd(totalSavings) + '</span><span class="token-stat-label">' + t('electron.saved') + '</span></div>' +
+        '</div>';
+
+      // Per-model table
+      let tableHtml = '<div class="token-table">' +
+        '<div class="token-table-hdr">' +
+          '<span>' + t('electron.model') + '</span><span>' + t('electron.tokenTokens') + '</span><span>' + t('electron.calls') + '</span><span class="right">' + t('electron.saved') + '</span>' +
+        '</div>';
+
+      rows.forEach((row) => {
+        const iconKey = row.icon || "";
+        const svg = iconKey && window.agentBridgeModelIcons && window.agentBridgeModelIcons[iconKey]
+          ? window.agentBridgeModelIcons[iconKey] : "";
+        const iconHtml = svg
+          ? '<span class="token-model-icon">' + svg + '</span>'
+          : '<span class="token-model-icon placeholder">' + (row.label[0] || "?").toUpperCase() + '</span>';
+
+        tableHtml +=
+          '<div class="token-table-row">' +
+            '<span class="token-model-name">' + iconHtml + '<span>' + row.label + '</span></span>' +
+            '<span class="token-model-tokens">' + fmt(row.total) + '</span>' +
+            '<span class="token-model-calls">' + row.calls + '</span>' +
+            '<span class="token-model-savings right">' + usd(row.savings) + '</span>' +
+          '</div>';
+      });
+
+      tableHtml += '</div>';
+      elements.tokenModelList.innerHTML = tableHtml;
+      elements.tokenTotalSavings.innerHTML = usd(totalSavings);
+
+      elements.tokenModal.classList.remove("hidden");
+    })
+    .catch(() => {
+      elements.tokenSummary.textContent = t("electron.tokenError");
+      elements.tokenModal.classList.remove("hidden");
+    });
+}
+
+elements.tokenButton.addEventListener('click', openTokenModal);
+elements.closeTokenButton.addEventListener('click', () => elements.tokenModal.classList.add('hidden'));
 
 bridge.onStatus(renderStatus);
 bridge.getStatus().then((status) => {

@@ -97,20 +97,23 @@ function responseFromUpstream(response: Response) {
   });
 }
 
-// Extrai usage.total_tokens de um chunk SSE, se houver. So tenta o JSON.parse
-// quando o texto realmente menciona "usage" para nao pagar parse em cada token.
-function extractTotalTokens(data: string): number | undefined {
+function extractUsage(data: string): { totalTokens?: number; promptTokens?: number; completionTokens?: number } | undefined {
   if (!data.includes('"usage"')) return undefined;
   try {
     const parsed = JSON.parse(data);
-    const total = parsed?.usage?.total_tokens;
-    return typeof total === 'number' ? total : undefined;
+    const usage = parsed?.usage;
+    if (!usage) return undefined;
+    return {
+      totalTokens: typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined,
+      promptTokens: typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : undefined,
+      completionTokens: typeof usage.completion_tokens === 'number' ? usage.completion_tokens : undefined
+    };
   } catch {
     return undefined;
   }
 }
 
-function appendSseTextAndHasDone(state: { buffer: string; totalTokens?: number }, text: string) {
+function appendSseTextAndHasDone(state: { buffer: string; totalTokens?: number; promptTokens?: number; completionTokens?: number }, text: string) {
   state.buffer += text;
   while (true) {
     const boundary = state.buffer.search(/\r?\n\r?\n/);
@@ -128,8 +131,12 @@ function appendSseTextAndHasDone(state: { buffer: string; totalTokens?: number }
       .join('\n');
     if (data === '[DONE]') return true;
     if (data) {
-      const tokens = extractTotalTokens(data);
-      if (tokens !== undefined) state.totalTokens = tokens;
+      const usage = extractUsage(data);
+      if (usage) {
+        if (usage.totalTokens !== undefined) state.totalTokens = usage.totalTokens;
+        if (usage.promptTokens !== undefined) state.promptTokens = usage.promptTokens;
+        if (usage.completionTokens !== undefined) state.completionTokens = usage.completionTokens;
+      }
     }
   }
 }
@@ -171,11 +178,12 @@ function streamWithLogs(input: {
   requestStartedAt: number;
   attempt?: number;
   maxAttempts?: number;
+  model?: string;
 }) {
   let firstEnqueued = false;
   let completed = false;
   const decoder = new TextDecoder();
-  const sseState: { buffer: string; totalTokens?: number } = { buffer: '' };
+  const sseState: { buffer: string; totalTokens?: number; promptTokens?: number; completionTokens?: number } = { buffer: '' };
   const markCompletedAndClose = async (controller: ReadableStreamDefaultController<Uint8Array>) => {
     if (completed) return;
     completed = true;
@@ -184,7 +192,10 @@ function streamWithLogs(input: {
       requestStartedAt: input.requestStartedAt,
       attempt: input.attempt,
       maxAttempts: input.maxAttempts,
-      totalTokens: sseState.totalTokens
+      totalTokens: sseState.totalTokens,
+      promptTokens: sseState.promptTokens,
+      completionTokens: sseState.completionTokens,
+      model: input.model
     });
     await input.reader.cancel().catch(() => {});
     controller.close();
@@ -324,7 +335,7 @@ async function readRemainingText(
   reader: ReadableStreamDefaultReader<Uint8Array>
 ) {
   const decoder = new TextDecoder();
-  const sseState = { buffer: '' };
+  const sseState: { buffer: string; totalTokens?: number; promptTokens?: number; completionTokens?: number } = { buffer: '' };
   let text = firstChunk.length ? decoder.decode(firstChunk, { stream: true }) : '';
   if (firstChunk.length && appendSseTextAndHasDone(sseState, text)) {
     await reader.cancel().catch(() => {});
@@ -561,7 +572,8 @@ export async function forwardToNvidia(
           apiNumber,
           requestStartedAt,
           attempt,
-          maxAttempts
+          maxAttempts,
+          model: activeModel
         }), {
           status: response.status,
           statusText: response.statusText,
@@ -571,12 +583,16 @@ export async function forwardToNvidia(
 
       const text = await readRemainingText(value, reader);
       const completion = aggregateChatCompletion(parseSseEvents(text));
+      const usageInfo = (completion as { usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } }).usage;
       markApiResponseCompleted({
         apiNumber,
         requestStartedAt,
         attempt,
         maxAttempts,
-        totalTokens: (completion as { usage?: { total_tokens?: number } }).usage?.total_tokens,
+        totalTokens: usageInfo?.total_tokens,
+        promptTokens: usageInfo?.prompt_tokens,
+        completionTokens: usageInfo?.completion_tokens,
+        model: activeModel,
         timestamp: now()
       });
       return Response.json(completion, {

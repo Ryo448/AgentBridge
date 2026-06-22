@@ -12,6 +12,7 @@ import {
   DEFAULT_AUTO_TOGGLE,
   DEFAULT_MODEL,
   DEFAULT_MODEL_CATALOG,
+  DEFAULT_MODEL_PRICES,
   DEFAULT_MODEL_PRIORITY,
   DEFAULT_PORT,
   INTERNAL_API_KEY,
@@ -25,6 +26,7 @@ import {
   unlockConfig,
   type UnlockedConfig
 } from '../services/vault.ts';
+import { flushTokenUsage } from '../services/token-tracking.ts';
 import {
   clearRuntimeConfig,
   type ApiRequestLogEvent,
@@ -458,10 +460,17 @@ function sanitizeCatalog(value: unknown): ModelCatalogEntry[] {
     const model = String(entry.model || '').trim();
     if (!model || seen.has(model)) continue;
     seen.add(model);
+    const defPrices = DEFAULT_MODEL_PRICES[model];
     catalog.push({
       model,
       label: String(entry.label || '').trim() || model,
-      icon: String(entry.icon || '').trim()
+      icon: String(entry.icon || '').trim(),
+      inputPrice: typeof entry.inputPrice === 'number' && Number.isFinite(entry.inputPrice) && entry.inputPrice >= 0
+        ? entry.inputPrice
+        : (defPrices ? defPrices.input : undefined),
+      outputPrice: typeof entry.outputPrice === 'number' && Number.isFinite(entry.outputPrice) && entry.outputPrice >= 0
+        ? entry.outputPrice
+        : (defPrices ? defPrices.output : undefined)
     });
   }
   return catalog.length ? catalog : unlockedConfig.modelCatalog;
@@ -676,7 +685,12 @@ function createMainWindow() {
 }
 
 electronApp.setName(APP_NAME);
+function tokenUsagePath() {
+  return path.join(electronApp.getPath('documents'), 'AgentBridge', 'used_tokens.json');
+}
+
 electronApp.on('before-quit', () => {
+  flushTokenUsage(tokenUsagePath());
   sessionPassword = '';
   usageLog = [];
   if (statusRefreshTimer) clearInterval(statusRefreshTimer);

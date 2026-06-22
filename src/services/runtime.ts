@@ -98,6 +98,8 @@ export type ApiRequestLogEvent = {
   message?: string;
   // Tokens consumidos na request (prompt + completion), quando a NVIDIA informa.
   totalTokens?: number;
+  promptTokens?: number;
+  completionTokens?: number;
 };
 
 export const API_REQUEST_LOG_RETENTION_MS = 3 * 60_000;
@@ -560,6 +562,9 @@ export function markApiResponseCompleted(input: {
   attempt?: number;
   maxAttempts?: number;
   totalTokens?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  model?: string;
   timestamp?: number;
 }) {
   const timestamp = input.timestamp ?? Date.now();
@@ -573,7 +578,10 @@ export function markApiResponseCompleted(input: {
     elapsedMs: timestamp - input.requestStartedAt,
     attempt: input.attempt,
     maxAttempts: input.maxAttempts,
-    totalTokens: input.totalTokens
+    totalTokens: input.totalTokens,
+    promptTokens: input.promptTokens,
+    completionTokens: input.completionTokens,
+    model: input.model
   });
 }
 

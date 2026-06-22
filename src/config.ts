@@ -1,5 +1,5 @@
 export const APP_NAME = 'AgentBridge';
-export const APP_VERSION = '3.5.0';
+export const APP_VERSION = '3.5.3';
 export const INTERNAL_API_KEY = 'EuAmoORyo';
 export const DEFAULT_PORT = 3000;
 // Modelo NVIDIA padrao para onde o proxy redireciona qualquer chamada quando o
@@ -12,21 +12,35 @@ export const DEFAULT_MODEL = 'deepseek-ai/deepseek-v4-pro';
 // enviado para a NVIDIA; `label` e o nome amigavel exibido; `icon` e a chave do SVG
 // embutido (deepseek, kimi, nemotron, qwen, minimax). Modelos adicionados pelo
 // usuario usam icon vazio: a UI desenha um placeholder com a primeira letra do nome.
+// `inputPrice` e `outputPrice` sao o custo por milhao de tokens (USD) cobrado pela
+// NVIDIA para este modelo, usados para calcular a economia no AgentBridge.
 export type ModelCatalogEntry = {
   label: string;
   model: string;
   icon: string;
+  inputPrice?: number;
+  outputPrice?: number;
+};
+
+// Precos padrao NVIDIA para os modelos pre-instalados (USD por 1M tokens).
+export const DEFAULT_MODEL_PRICES: Record<string, { input: number; output: number }> = {
+  'deepseek-ai/deepseek-v4-pro': { input: 0.435, output: 0.87 },
+  'deepseek-ai/deepseek-v4-flash': { input: 0.09, output: 0.18 },
+  'moonshotai/kimi-k2.6': { input: 0.66, output: 3.50 },
+  'nvidia/nemotron-3-ultra-550b-a55b': { input: 0.50, output: 2.20 },
+  'minimaxai/minimax-m3': { input: 0.30, output: 1.20 },
+  'qwen/qwen3.5-397b-a17b': { input: 0.385, output: 2.45 }
 };
 
 // Catalogo padrao de modelos. Pode ser editado, reordenado e ampliado pelo usuario;
 // os valores aqui sao apenas o ponto de partida quando ainda nao ha nada salvo.
 export const DEFAULT_MODEL_CATALOG: ModelCatalogEntry[] = [
-  { label: 'Deepseek v4 pro', model: 'deepseek-ai/deepseek-v4-pro', icon: 'deepseek' },
-  { label: 'Kimi', model: 'moonshotai/kimi-k2.6', icon: 'kimi' },
-  { label: 'Deepseek v4 flash', model: 'deepseek-ai/deepseek-v4-flash', icon: 'deepseek' },
-  { label: 'Nemotron', model: 'nvidia/nemotron-3-ultra-550b-a55b', icon: 'nemotron' },
-  { label: 'Qwen', model: 'qwen/qwen3.5-397b-a17b', icon: 'qwen' },
-  { label: 'Minimax M3', model: 'minimaxai/minimax-m3', icon: 'minimax' }
+  { label: 'Deepseek v4 pro', model: 'deepseek-ai/deepseek-v4-pro', icon: 'deepseek', inputPrice: 0.435, outputPrice: 0.87 },
+  { label: 'Kimi', model: 'moonshotai/kimi-k2.6', icon: 'kimi', inputPrice: 0.66, outputPrice: 3.50 },
+  { label: 'Deepseek v4 flash', model: 'deepseek-ai/deepseek-v4-flash', icon: 'deepseek', inputPrice: 0.09, outputPrice: 0.18 },
+  { label: 'Nemotron', model: 'nvidia/nemotron-3-ultra-550b-a55b', icon: 'nemotron', inputPrice: 0.50, outputPrice: 2.20 },
+  { label: 'Qwen', model: 'qwen/qwen3.5-397b-a17b', icon: 'qwen', inputPrice: 0.385, outputPrice: 2.45 },
+  { label: 'Minimax M3', model: 'minimaxai/minimax-m3', icon: 'minimax', inputPrice: 0.30, outputPrice: 1.20 }
 ];
 
 // Ordem de prioridade padrao do failover automatico de modelo (ids "provider/modelo").
