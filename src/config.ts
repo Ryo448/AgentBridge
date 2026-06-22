@@ -1,5 +1,5 @@
 export const APP_NAME = 'AgentBridge';
-export const APP_VERSION = '3.0.0';
+export const APP_VERSION = '3.5.0';
 export const INTERNAL_API_KEY = 'EuAmoORyo';
 export const DEFAULT_PORT = 3000;
 // Modelo NVIDIA padrao para onde o proxy redireciona qualquer chamada quando o
