@@ -12,6 +12,7 @@ import {
   RATE_LIMIT_WINDOW_MS
 } from './config.ts';
 import { recordTokenUsage, readTokenUsage, flushTokenUsage } from './services/token-tracking.ts';
+import { extractClientIp, extractUserPrompt, saveLastPrompt } from './services/lastPrompt.ts';
 import { responsesApi, anthropicMessagesApi } from './routes/compatibility.ts';
 import { withLocalToolInstructions } from './routes/toolInstructions.ts';
 import { forwardToNvidia } from './services/nvidia.ts';
@@ -35,6 +36,9 @@ import {
 } from './services/runtime.ts';
 
 export const app = new Hono();
+
+// WeakMap para associar IP do cliente ao contexto Hono sem tipagem rigida
+const clientIpMap = new WeakMap<object, string>();
 
 app.use('*', cors());
 
@@ -90,6 +94,8 @@ app.use('/v1/*', async (context, next) => {
   const requestStartedAt = Date.now();
   const method = context.req.method;
   const path = context.req.path;
+  const clientIp = extractClientIp(context);
+  clientIpMap.set(context, clientIp);
   markClientRequestReceived({ method, path, timestamp: requestStartedAt });
   const bearer = context.req.header('authorization')?.replace(/^Bearer\s+/i, '');
   const apiKey = context.req.header('x-api-key');
@@ -131,7 +137,7 @@ app.use('/v1/*', async (context, next) => {
   }
 });
 
-async function invokeChat(body: Record<string, unknown>, abortSignal?: AbortSignal) {
+async function invokeChat(body: Record<string, unknown>, clientIp: string, abortSignal?: AbortSignal) {
   // Roteamento de modelo (vale para /v1/chat/completions, /v1/responses e
   // /v1/messages):
   //   - model "AgentBridge" ou vazio -> REDIRECIONA para o modelo efetivo (modo
@@ -159,7 +165,13 @@ async function invokeChat(body: Record<string, unknown>, abortSignal?: AbortSign
   // primario demora > 60s para dar o primeiro sinal, dispara um backup no
   // proximo modelo disponivel. Nunca ativo em modo manual ou passthrough.
   const enableHedge = !isPassthrough && isAuto;
-  return forwardToNvidia(withLocalToolInstructions(overridden), fetch, undefined, {}, { resolveModel, enableHedge, abortSignal });
+  const response = await forwardToNvidia(withLocalToolInstructions(overridden), fetch, undefined, {}, { resolveModel, enableHedge, abortSignal });
+
+  // Salva last_prompt.json apos resposta (sem bloquear o retorno ao cliente)
+  const savedWithIp = clientIp || '127.0.0.1';
+  void saveLastPromptAsync(response, body, savedWithIp);
+
+  return response;
 }
 
 // Catalogo "real" de modelos que o gateway conhece: a uniao da lista de
@@ -195,6 +207,64 @@ async function invokeChatDirect(body: Record<string, unknown>) {
   }
   const overridden = { ...body, model: requested };
   return forwardToNvidia(withLocalToolInstructions(overridden), fetch, undefined, {}, {});
+}
+
+// Extrai o texto de resposta assincrono do Response e salva no last_prompt.json
+async function saveLastPromptAsync(response: Response, body: Record<string, unknown>, clientIp: string) {
+  try {
+    const cloned = response.clone();
+    const contentType = cloned.headers.get('content-type') || '';
+    let responseText = '';
+    if (contentType.includes('application/json')) {
+      const json = await cloned.json() as Record<string, unknown>;
+      responseText = extractResponseContent(json);
+    } else if (contentType.includes('text/event-stream')) {
+      // Para streams SSE, le os primeiros bytes para capturar conteudo textual
+      const text = await cloned.text();
+      responseText = extractSseContent(text);
+    }
+    void saveLastPrompt({
+      model: typeof body.model === 'string' ? body.model : '',
+      prompt: extractUserPrompt(body),
+      response: responseText,
+      clientIp,
+      savedAt: ''
+    });
+  } catch {
+    // Ignora erros de parse — nao pode derrubar a resposta
+  }
+}
+
+function extractResponseContent(json: Record<string, unknown>): string {
+  const choices = json.choices as Array<{ message?: { content?: string } }> | undefined;
+  if (choices?.[0]?.message?.content) return String(choices[0].message.content);
+  // Anthropic Messages (compatibilidade)
+  const content = json.content as Array<{ type: string; text?: string }> | undefined;
+  if (Array.isArray(content)) {
+    return content.filter((c) => c.type === 'text').map((c) => c.text || '').join('\n');
+  }
+  return JSON.stringify(json);
+}
+
+function extractSseContent(text: string): string {
+  const lines = text.split('\n');
+  let content = '';
+  for (const line of lines) {
+    if (line.startsWith('data: ')) {
+      const data = line.slice(6);
+      if (data === '[DONE]') continue;
+      try {
+        const parsed = JSON.parse(data) as Record<string, unknown>;
+        const choices = parsed.choices as Array<{ delta?: { content?: string } }> | undefined;
+        if (choices?.[0]?.delta?.content) {
+          content += String(choices[0].delta.content);
+        }
+      } catch {
+        // Ignora linhas invalidas
+      }
+    }
+  }
+  return content;
 }
 
 app.get('/health', (context) => {
@@ -253,13 +323,14 @@ app.get('/v1/models', (context) => {
 
 app.post('/v1/chat/completions', async (context) => {
   try {
-    return await invokeChat(await context.req.json<Record<string, unknown>>(), context.req.raw.signal);
+    const clientIp = clientIpMap.get(context) || '';
+    return await invokeChat(await context.req.json<Record<string, unknown>>(), clientIp, context.req.raw.signal);
   } catch (error: any) {
     return context.json({ error: { type: 'proxy_error', message: error.message } }, 503);
   }
 });
-app.post('/v1/responses', (context) => responsesApi(context, (body) => invokeChat(body, context.req.raw.signal)));
-app.post('/v1/messages', (context) => anthropicMessagesApi(context, (body) => invokeChat(body, context.req.raw.signal)));
+app.post('/v1/responses', (context) => responsesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', context.req.raw.signal)));
+app.post('/v1/messages', (context) => anthropicMessagesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', context.req.raw.signal)));
 
 // ---------------------------------------------------------------------------
 // Rotas DIRETAS (isoladas). Nao alteram o comportamento das rotas acima: aqui o
