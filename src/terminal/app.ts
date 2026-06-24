@@ -350,9 +350,9 @@ function dashboardLines(): string[] {
     : [c.faint(t('dashboard.waitingRequest'))];
   // Preenche ate a altura fixa para a caixa nao "pular".
   while (logRows.length < logHeight) logRows.push('');
-  const rpm = c.accentStrong(`${formatTokens(totalTokens)} Tokens`);
+  const rpmLabel = c.accentStrong(`${status.requestsThisMinute}/${status.capacityPerMinute} RPM`);
   lines.push(...box({
-    title: t('dashboard.logTitle') + '   ' + rpm,
+    title: t('dashboard.logTitle') + '   ' + rpmLabel,
     lines: logRows,
     innerWidth: w,
     color: c.faint,
