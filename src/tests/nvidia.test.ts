@@ -43,7 +43,7 @@ test('NVIDIA forwarding waits before starting the upstream request', async () =>
   assert.ok(fetchAt - startedAt >= 20);
 });
 
-test('NVIDIA forwarding paces requests instead of bursting into a long RPM wait', async () => {
+test('NVIDIA forwarding sends first 35 without wait, then waits for RPM window reset', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['nvapi-limited'] });
   let now = 240_000;
@@ -61,10 +61,11 @@ test('NVIDIA forwarding paces requests instead of bursting into a long RPM wait'
   for (let index = 0; index < 35; index++) {
     await forwardToNvidia({ model: 'test' }, fakeFetch, 0, rateLimitOptions);
   }
+  // As primeiras 35 devem sair sem delay (sem pacing).
+  assert.equal(rateSleeps.length, 0);
+  // A 36a dispara o teto de 35 RPM e espera a reabertura da janela.
   await forwardToNvidia({ model: 'test' }, fakeFetch, 0, rateLimitOptions);
-
-  assert.ok(rateSleeps.length > 1);
-  assert.ok(rateSleeps.every((milliseconds) => milliseconds <= 1715));
+  assert.ok(rateSleeps.length > 0);
 });
 
 test('NVIDIA forwarding aggregates upstream streaming for non-streaming clients and logs lifecycle', async () => {

@@ -25,7 +25,6 @@ type ModelPenalty = {
 type ApiKeyState = {
   apiKey: string;
   requestTimestamps: number[];
-  nextAllowedAt: number | null;
   // Castigo de 429 POR MODELO. A chave pode estar de castigo no Kimi mas ainda
   // livre no Deepseek: cada 429 marca apenas o modelo que veio na request, entao
   // trocar de modelo nao paga cooldown desnecessario. A chave do Map e o nome do
@@ -104,7 +103,6 @@ export type ApiRequestLogEvent = {
 };
 
 export const API_REQUEST_LOG_RETENTION_MS = 3 * 60_000;
-export const RPM_PACING_INTERVAL_MS = Math.ceil(RATE_LIMIT_WINDOW_MS / NVIDIA_RPM_LIMIT);
 
 let apiKeyStates: ApiKeyState[] = [];
 let currentPort = DEFAULT_PORT;
@@ -172,7 +170,6 @@ export function setRuntimeConfig(config: {
     return previous || {
       apiKey,
       requestTimestamps: [],
-      nextAllowedAt: null,
       penalties: new Map<string, ModelPenalty>(),
       successCounts: new Map<string, number>()
     };
@@ -421,9 +418,7 @@ function normalizeRequestDelayMs(value: unknown) {
 function resetExpiredWindow(state: ApiKeyState, timestamp: number) {
   const cutoff = timestamp - RATE_LIMIT_WINDOW_MS;
   state.requestTimestamps = state.requestTimestamps.filter((value) => value > cutoff);
-  if (state.nextAllowedAt !== null && state.nextAllowedAt <= timestamp) {
-    state.nextAllowedAt = null;
-  }
+  
   // Remove castigos por modelo ja expirados. Ao sair do castigo, a contagem de
   // 200 daquele modelo volta para 0 (comeca a contar de novo do zero).
   for (const [model, penalty] of state.penalties) {
@@ -831,8 +826,7 @@ export async function reserveSendSlot(options: {
   // envios ficam espacados em delayMs entre si, mesmo com varias requests
   // concorrentes chegando juntas. Assim o delay realmente controla a TAXA que
   // chega na NVIDIA (e o consumo de RPM), em vez de so atrasar um lote inteiro
-  // em paralelo. O pacing por chave (RPM_PACING_INTERVAL_MS) continua valendo
-  // como piso de protecao quando o delay configurado e menor que ele.
+  // em paralelo. O teto de 35 RPM por chave continua valendo como protecao.
   const sendAt = Math.max(current, nextSendAt) + delayMs;
   nextSendAt = sendAt;
   const waitMs = sendAt - current;
@@ -895,14 +889,11 @@ export async function acquireApiKey(options: AcquireApiKeyOptions = {}) {
     cursor = chosenIndex; // gruda na chave escolhida
     const state = apiKeyStates[chosenIndex];
 
-    // Protecao de 35 RPM + pacing NA chave atual (para nao estourar os ~40 reais da NVIDIA).
+    // Protecao de 35 RPM NA chave atual (para nao estourar os ~40 reais da NVIDIA).
     const rpmWaitMs = state.requestTimestamps.length >= NVIDIA_RPM_LIMIT
       ? (state.requestTimestamps[0] + RATE_LIMIT_WINDOW_MS) - timestamp
       : 0;
-    const pacingWaitMs = state.nextAllowedAt === null
-      ? 0
-      : state.nextAllowedAt - timestamp;
-    const waitMs = Math.max(0, rpmWaitMs, pacingWaitMs);
+    const waitMs = Math.max(0, rpmWaitMs);
     if (waitMs > 0) {
       markRateLimitWaiting({ waitMs, timestamp });
       await sleep(waitMs);
@@ -910,7 +901,6 @@ export async function acquireApiKey(options: AcquireApiKeyOptions = {}) {
     }
 
     state.requestTimestamps.push(timestamp);
-    state.nextAllowedAt = timestamp + RPM_PACING_INTERVAL_MS;
     // NAO avanca o cursor: o fluxo segue na mesma chave ate ela levar 429.
     const totalRequestsThisMinute = totalRequests(timestamp);
     const usageEvent = {
