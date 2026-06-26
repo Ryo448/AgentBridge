@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('agentBridge', {
   setAutoToggle: (value) => ipcRenderer.invoke('model:setAuto', value),
   updateModels: (payload) => ipcRenderer.invoke('models:update', payload),
   setLocale: (locale) => ipcRenderer.invoke('locale:set', locale),
+  exportApis: () => ipcRenderer.invoke('export:apis'),
   copy: (value) => ipcRenderer.invoke('clipboard:copy', value),
   onStatus: (callback) => {
     const listener = (_event, status) => callback(status);

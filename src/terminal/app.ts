@@ -484,6 +484,7 @@ async function apisScreen(): Promise<void> {
     items.push({ label: c.accent(t('apis.add')), value: 'add', hint: '' });
     if (unlockedConfig.apiKeys.length) {
       items.push({ label: t('apis.save'), value: 'save', hint: c.faint(t('apis.nKeys', { count: String(unlockedConfig.apiKeys.length) })) });
+      items.push({ label: t('apis.export'), value: 'export', hint: c.faint(t('apis.exportFile') + ' ' + path.join(appDir(), 'api_keys.txt')) });
     }
     items.push({ label: c.muted(t('apis.back')), value: 'back', hint: '' });
 
@@ -523,6 +524,11 @@ async function apisScreen(): Promise<void> {
       continue;
     }
 
+    if (choice === 'export') {
+      await exportApis();
+      continue;
+    }
+
     if (choice.startsWith('edit:')) {
       const idx = Number(choice.slice(5));
       const action = await selectMenu({
@@ -552,6 +558,19 @@ async function apisScreen(): Promise<void> {
       continue;
     }
   }
+}
+
+async function exportApis(): Promise<void> {
+  const file = path.join(appDir(), 'api_keys.txt');
+  const content = unlockedConfig.apiKeys.join('\n');
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, content, 'utf8');
+  await pause({
+    lines: sectionHeader(t('apis.export'), '').concat(
+      '  ' + c.green(t('apis.exported')),
+      '  ' + c.faint(file)
+    )
+  });
 }
 
 // ----------------------------------------------------------------------------

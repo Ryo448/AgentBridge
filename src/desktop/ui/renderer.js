@@ -20,7 +20,7 @@ const previewStatus = {
     ? window.agentBridgeModels.map((item) => item.model)
     : [],
   provider: 'NVIDIA',
-  appVersion: '3.5.3',
+  appVersion: '4.1.0',
   apiKey: 'EuAmoORyo',
   needLocalKey: false,
   codexBaseUrl: 'http://localhost:3000/v1',
@@ -80,7 +80,7 @@ const elements = Object.fromEntries([
   'stopButton', 'codexConfig', 'claudeConfig', 'chatValue', 'responsesValue',
   'messagesValue', 'apiKeyValue', 'messageLine', 'unlockModal', 'unlockForm',
   'passwordInput', 'unlockHint', 'unlockError', 'configModal', 'configForm',
-  'closeConfigButton', 'apiFields', 'addApiButton',
+  'closeConfigButton', 'apiFields', 'addApiButton', 'exportApisButton',
   'changeKeyButton', 'localKeyModal', 'localKeyForm', 'closeLocalKeyButton',
   'localKeyInput', 'localKeyError', 'localKeyHint',
   'configPathValue', 'configError', 'rpmCounter', 'usageTerminalOutput',
@@ -833,6 +833,13 @@ elements.unlockForm.addEventListener('submit', async (event) => {
 elements.configButton.addEventListener('click', openConfig);
 elements.closeConfigButton.addEventListener('click', () => elements.configModal.classList.add('hidden'));
 elements.addApiButton.addEventListener('click', () => addApiField());
+elements.exportApisButton.addEventListener('click', () => bridge.exportApis().then((result) => {
+  if (result && result.ok) {
+    elements.messageText.textContent = t('electron.exportApisDone', { path: result.path || '' });
+  } else {
+    elements.messageText.textContent = (result && result.error) || t('error.sentenceCouldNotExport');
+  }
+}));
 elements.configForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   elements.configError.textContent = '';

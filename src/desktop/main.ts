@@ -655,6 +655,19 @@ function registerIpc() {
     return getStatus();
   });
   ipcMain.handle('locale:getMessages', () => getMessages());
+  ipcMain.handle('export:apis', () => {
+    if (!sessionPassword) return { ok: false, error: t('error.unlockFirst') };
+    try {
+      const dir = path.join(electronApp.getPath('documents'), 'AgentBridge');
+      const file = path.join(dir, 'api_keys.txt');
+      const content = unlockedConfig.apiKeys.join('\n');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(file, content, 'utf8');
+      return { ok: true, path: file };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
 }
 
 function createMainWindow() {
