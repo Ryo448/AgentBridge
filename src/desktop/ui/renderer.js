@@ -20,7 +20,7 @@ const previewStatus = {
     ? window.agentBridgeModels.map((item) => item.model)
     : [],
   provider: 'NVIDIA',
-  appVersion: '4.1.0',
+  appVersion: '4.1.1',
   apiKey: 'EuAmoORyo',
   needLocalKey: false,
   codexBaseUrl: 'http://localhost:3000/v1',
@@ -136,8 +136,13 @@ function formatElapsed(milliseconds) {
   return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)} s`;
 }
 
+function clientTarget(entry) {
+  const route = entry.path ? `${entry.method || ''} ${entry.path}`.trim() : '';
+  return [entry.protocol ? `[${entry.protocol}]` : '', route].filter(Boolean).join(' ');
+}
+
 function usageMessage(entry) {
-  const target = entry.path ? `${entry.method || ''} ${entry.path}`.trim() : '';
+  const target = clientTarget(entry);
   if (entry.type === 'received') return t('log.clientCalled', { target });
   if (entry.type === 'rejected') return t('log.clientRejected', { target, status: String(entry.status), message: entry.message || t('log.invalidKey') });
   if (entry.type === 'completed_client') return t('log.clientReceived', { target, status: String(entry.status), elapsed: formatElapsed(entry.elapsedMs) });

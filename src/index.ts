@@ -89,14 +89,26 @@ app.get('/v1/tokens/usage', (context) => {
   flushTokenUsage(tokenUsagePath());
   return context.json(readTokenUsage(tokenUsagePath()));
 });
+function clientProtocolFromPath(path: string) {
+  if (path === '/v1/chat/completions') return 'Chat Completions';
+  if (path === '/v1/responses') return 'Responses';
+  if (path === '/v1/messages') return 'Anthropic Messages';
+  if (path === '/v1/direct/chat/completions') return 'Direct Chat Completions';
+  if (path === '/v1/direct/responses') return 'Direct Responses';
+  if (path === '/v1/direct/messages') return 'Direct Anthropic Messages';
+  if (path === '/v1/models') return 'Models';
+  if (path === '/v1/models/available') return 'Available Models';
+  return 'Other';
+}
 
 app.use('/v1/*', async (context, next) => {
   const requestStartedAt = Date.now();
   const method = context.req.method;
   const path = context.req.path;
   const clientIp = extractClientIp(context);
+  const protocol = clientProtocolFromPath(path);
   clientIpMap.set(context, clientIp);
-  markClientRequestReceived({ method, path, timestamp: requestStartedAt });
+  markClientRequestReceived({ method, path, protocol, timestamp: requestStartedAt });
   const bearer = context.req.header('authorization')?.replace(/^Bearer\s+/i, '');
   const apiKey = context.req.header('x-api-key');
   // Compara contra a chave local viva (definida pelo usuario, ou a padrao do
@@ -107,6 +119,7 @@ app.use('/v1/*', async (context, next) => {
     markClientRequestRejected({
       method,
       path,
+      protocol,
       status: 401,
       message: 'Chave local invalida.',
       requestStartedAt
@@ -123,6 +136,7 @@ app.use('/v1/*', async (context, next) => {
     markClientRequestCompleted({
       method,
       path,
+      protocol,
       status: context.res.status,
       requestStartedAt
     });
@@ -130,6 +144,7 @@ app.use('/v1/*', async (context, next) => {
     markClientRequestFailed({
       method,
       path,
+      protocol,
       message: error instanceof Error ? error.message : String(error),
       requestStartedAt
     });
@@ -137,7 +152,11 @@ app.use('/v1/*', async (context, next) => {
   }
 });
 
-async function invokeChat(body: Record<string, unknown>, clientIp: string, abortSignal?: AbortSignal) {
+async function invokeChat(
+  body: Record<string, unknown>,
+  clientIp: string,
+  options: { abortSignal?: AbortSignal; localToolInstructions?: boolean } = {}
+) {
   // Roteamento de modelo (vale para /v1/chat/completions, /v1/responses e
   // /v1/messages):
   //   - model "AgentBridge" ou vazio -> REDIRECIONA para o modelo efetivo (modo
@@ -165,7 +184,14 @@ async function invokeChat(body: Record<string, unknown>, clientIp: string, abort
   // primario demora > 60s para dar o primeiro sinal, dispara um backup no
   // proximo modelo disponivel. Nunca ativo em modo manual ou passthrough.
   const enableHedge = !isPassthrough && isAuto;
-  const response = await forwardToNvidia(withLocalToolInstructions(overridden), fetch, undefined, {}, { resolveModel, enableHedge, abortSignal });
+  const upstreamBody = options.localToolInstructions === false
+    ? overridden
+    : withLocalToolInstructions(overridden);
+  const response = await forwardToNvidia(upstreamBody, fetch, undefined, {}, {
+    resolveModel,
+    enableHedge,
+    abortSignal: options.abortSignal
+  });
 
   // Salva last_prompt.json apos resposta (sem bloquear o retorno ao cliente)
   const savedWithIp = clientIp || '127.0.0.1';
@@ -196,7 +222,10 @@ const CATALOG_META = new Map(
 // que o cliente mandou (passthrough direto), sem failover automatico e sem
 // depender do modelo selecionado no app. O castigo de 429 continua sendo
 // rastreado por modelo dentro do forwardToNvidia (deriva de body.model).
-async function invokeChatDirect(body: Record<string, unknown>) {
+async function invokeChatDirect(
+  body: Record<string, unknown>,
+  options: { localToolInstructions?: boolean } = {}
+) {
   const requested = String(body.model || '').trim();
   if (!requested || requested === FIXED_CLIENT_MODEL) {
     const err: any = new Error(
@@ -206,7 +235,10 @@ async function invokeChatDirect(body: Record<string, unknown>) {
     throw err;
   }
   const overridden = { ...body, model: requested };
-  return forwardToNvidia(withLocalToolInstructions(overridden), fetch, undefined, {}, {});
+  const upstreamBody = options.localToolInstructions === false
+    ? overridden
+    : withLocalToolInstructions(overridden);
+  return forwardToNvidia(upstreamBody, fetch, undefined, {}, {});
 }
 
 // Extrai o texto de resposta assincrono do Response e salva no last_prompt.json
@@ -324,13 +356,16 @@ app.get('/v1/models', (context) => {
 app.post('/v1/chat/completions', async (context) => {
   try {
     const clientIp = clientIpMap.get(context) || '';
-    return await invokeChat(await context.req.json<Record<string, unknown>>(), clientIp, context.req.raw.signal);
+    return await invokeChat(await context.req.json<Record<string, unknown>>(), clientIp, {
+      abortSignal: context.req.raw.signal,
+      localToolInstructions: false
+    });
   } catch (error: any) {
     return context.json({ error: { type: 'proxy_error', message: error.message } }, 503);
   }
 });
-app.post('/v1/responses', (context) => responsesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', context.req.raw.signal)));
-app.post('/v1/messages', (context) => anthropicMessagesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', context.req.raw.signal)));
+app.post('/v1/responses', (context) => responsesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', { abortSignal: context.req.raw.signal })));
+app.post('/v1/messages', (context) => anthropicMessagesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', { abortSignal: context.req.raw.signal })));
 
 // ---------------------------------------------------------------------------
 // Rotas DIRETAS (isoladas). Nao alteram o comportamento das rotas acima: aqui o
@@ -372,7 +407,9 @@ app.get('/v1/models/available', (context) => {
 // Chat Completions DIRETO: usa o `model` do corpo como esta, sem redirecionar.
 app.post('/v1/direct/chat/completions', async (context) => {
   try {
-    return await invokeChatDirect(await context.req.json<Record<string, unknown>>());
+    return await invokeChatDirect(await context.req.json<Record<string, unknown>>(), {
+      localToolInstructions: false
+    });
   } catch (error: any) {
     return context.json(
       { error: { type: 'proxy_error', message: error.message } },
@@ -385,6 +422,11 @@ app.post('/v1/direct/chat/completions', async (context) => {
 app.post('/v1/direct/responses', (context) => responsesApi(context, invokeChatDirect));
 app.post('/v1/direct/messages', (context) => anthropicMessagesApi(context, invokeChatDirect));
 
+function clientLogTarget(event: ApiRequestLogEvent) {
+  const route = event.path ? `${event.method || ''} ${event.path}`.trim() : '';
+  return [event.protocol ? `[${event.protocol}]` : '', route].filter(Boolean).join(' ');
+}
+
 function formatStandaloneLog(event: ApiRequestLogEvent) {
   const time = new Date(event.timestamp).toLocaleTimeString(getLocale());
   const elapsed = event.elapsedMs === undefined ? '' : ` em ${event.elapsedMs}ms`;
@@ -393,16 +435,16 @@ function formatStandaloneLog(event: ApiRequestLogEvent) {
     : '';
 
   if (event.type === 'received') {
-    return `[${time}] Cliente chamou ${event.method} ${event.path}`;
+    return `[${time}] Cliente chamou ${clientLogTarget(event)}`;
   }
   if (event.type === 'rejected') {
-    return `[${time}] Cliente rejeitado ${event.method} ${event.path} HTTP ${event.status}${elapsed}: ${event.message}`;
+    return `[${time}] Cliente rejeitado ${clientLogTarget(event)} HTTP ${event.status}${elapsed}: ${event.message}`;
   }
   if (event.type === 'completed_client') {
-    return `[${time}] Cliente recebeu HTTP ${event.status} ${event.method} ${event.path}${elapsed}`;
+    return `[${time}] Cliente recebeu HTTP ${event.status} ${clientLogTarget(event)}${elapsed}`;
   }
   if (event.type === 'failed_client') {
-    return `[${time}] Erro no proxy ${event.method} ${event.path}${elapsed}: ${event.message}`;
+    return `[${time}] Erro no proxy ${clientLogTarget(event)}${elapsed}: ${event.message}`;
   }
   if (event.type === 'called') {
     return `[${time}] API ${event.apiNumber} selecionada (${event.requestsThisMinute}/${NVIDIA_RPM_LIMIT} nesta janela)`;

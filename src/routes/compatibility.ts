@@ -170,6 +170,14 @@ function anthropicMessagesToChat(body: any) {
   return messages;
 }
 
+function sseDataFromRawEvent(raw: string) {
+  return raw
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trimStart())
+    .join('\n');
+}
+
 async function* readChatEvents(response: Response) {
   if (!response.body) return;
   const reader = response.body.getReader();
@@ -188,16 +196,16 @@ async function* readChatEvents(response: Response) {
         const raw = buffer.slice(0, boundary);
         const separatorLength = buffer[boundary] === '\r' ? 4 : 2;
         buffer = buffer.slice(boundary + separatorLength);
-        const data = raw
-          .split(/\r?\n/)
-          .filter((line) => line.startsWith('data:'))
-          .map((line) => line.slice(5).trimStart())
-          .join('\n');
+        const data = sseDataFromRawEvent(raw);
         if (!data) continue;
         if (data === '[DONE]') return;
         yield JSON.parse(data);
       }
     }
+
+    buffer += decoder.decode();
+    const data = sseDataFromRawEvent(buffer.trimEnd());
+    if (data && data !== '[DONE]') yield JSON.parse(data);
   } finally {
     await reader.cancel().catch(() => {});
   }
@@ -312,21 +320,46 @@ export async function responsesApi(c: Context, invokeChat: ChatInvoker) {
   return honoStream(c, async (writer) => {
     let sequenceNumber = 0;
     const envelope = createResponseEnvelope(responseId, body.model);
-    const textItem = {
+    const createTextItem = () => ({
       type: 'message',
       id: `msg_${uuidv4()}`,
       status: 'in_progress',
       role: 'assistant',
       content: [] as any[]
-    };
+    });
+    let textItem = createTextItem();
     const toolItems = new Map<number, any>();
     let textStarted = false;
+    let textCompleted = false;
     let fullText = '';
     let finalUsage: any = null;
 
     const emit = (type: string, payload: Record<string, unknown>) => {
       const event = { type, sequence_number: sequenceNumber++, ...payload };
       return writer.write(`event: ${type}\ndata: ${JSON.stringify(event)}\n\n`);
+    };
+
+    const completeTextItem = async () => {
+      if (!textStarted || textCompleted) return;
+      textCompleted = true;
+      textItem.status = 'completed';
+      await emit('response.output_text.done', {
+        item_id: textItem.id,
+        output_index: envelope.output.indexOf(textItem),
+        content_index: 0,
+        text: fullText,
+        logprobs: []
+      });
+      await emit('response.content_part.done', {
+        item_id: textItem.id,
+        output_index: envelope.output.indexOf(textItem),
+        content_index: 0,
+        part: textItem.content[0]
+      });
+      await emit('response.output_item.done', {
+        output_index: envelope.output.indexOf(textItem),
+        item: textItem
+      });
     };
 
     await emit('response.created', { response: envelope });
@@ -338,6 +371,12 @@ export async function responsesApi(c: Context, invokeChat: ChatInvoker) {
       if (chunk.usage) finalUsage = chunk.usage;
 
       if (delta.content) {
+        if (textCompleted) {
+          textItem = createTextItem();
+          textStarted = false;
+          textCompleted = false;
+          fullText = '';
+        }
         if (!textStarted) {
           textStarted = true;
           textItem.content = [{
@@ -370,6 +409,7 @@ export async function responsesApi(c: Context, invokeChat: ChatInvoker) {
       }
 
       for (const toolCall of delta.tool_calls || []) {
+        await completeTextItem();
         const index = toolCall.index || 0;
         let item = toolItems.get(index);
         if (!item) {
@@ -400,26 +440,7 @@ export async function responsesApi(c: Context, invokeChat: ChatInvoker) {
       }
     }
 
-    if (textStarted) {
-      textItem.status = 'completed';
-      await emit('response.output_text.done', {
-        item_id: textItem.id,
-        output_index: envelope.output.indexOf(textItem),
-        content_index: 0,
-        text: fullText,
-        logprobs: []
-      });
-      await emit('response.content_part.done', {
-        item_id: textItem.id,
-        output_index: envelope.output.indexOf(textItem),
-        content_index: 0,
-        part: textItem.content[0]
-      });
-      await emit('response.output_item.done', {
-        output_index: envelope.output.indexOf(textItem),
-        item: textItem
-      });
-    }
+    await completeTextItem();
 
     for (const item of toolItems.values()) {
       item.status = 'completed';
@@ -505,6 +526,12 @@ export async function anthropicMessagesApi(c: Context, invokeChat: ChatInvoker) 
     const emit = (event: string, data: Record<string, unknown>) =>
       writer.write(`event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`);
 
+    const stopTextBlock = async () => {
+      if (textIndex === null) return;
+      await emit('content_block_stop', { index: textIndex });
+      textIndex = null;
+    };
+
     await emit('message_start', {
       message: {
         id: messageId,
@@ -539,6 +566,7 @@ export async function anthropicMessagesApi(c: Context, invokeChat: ChatInvoker) 
 
       for (const toolCall of delta.tool_calls || []) {
         hasTools = true;
+        await stopTextBlock();
         const index = toolCall.index || 0;
         let block = toolBlocks.get(index);
         if (!block) {
@@ -566,7 +594,7 @@ export async function anthropicMessagesApi(c: Context, invokeChat: ChatInvoker) 
       }
     }
 
-    if (textIndex !== null) await emit('content_block_stop', { index: textIndex });
+    await stopTextBlock();
     for (const block of toolBlocks.values()) {
       await emit('content_block_stop', { index: block.contentIndex });
     }

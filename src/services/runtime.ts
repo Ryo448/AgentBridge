@@ -89,6 +89,7 @@ export type ApiRequestLogEvent = {
   elapsedMs?: number;
   method?: string;
   path?: string;
+  protocol?: string;
   status?: number;
   model?: string;
   stream?: boolean;
@@ -660,12 +661,14 @@ export function markApiResponseCompleted(input: {
 export function markClientRequestReceived(input: {
   method: string;
   path: string;
+  protocol?: string;
   timestamp?: number;
 }) {
   emitRequestLog({
     type: 'received',
     method: input.method,
     path: input.path,
+    protocol: input.protocol,
     timestamp: input.timestamp ?? Date.now()
   });
 }
@@ -673,6 +676,7 @@ export function markClientRequestReceived(input: {
 export function markClientRequestRejected(input: {
   method: string;
   path: string;
+  protocol?: string;
   status: number;
   message: string;
   requestStartedAt: number;
@@ -683,6 +687,7 @@ export function markClientRequestRejected(input: {
     type: 'rejected',
     method: input.method,
     path: input.path,
+    protocol: input.protocol,
     status: input.status,
     message: input.message,
     timestamp,
@@ -693,6 +698,7 @@ export function markClientRequestRejected(input: {
 export function markClientRequestCompleted(input: {
   method: string;
   path: string;
+  protocol?: string;
   status: number;
   requestStartedAt: number;
   timestamp?: number;
@@ -702,6 +708,7 @@ export function markClientRequestCompleted(input: {
     type: 'completed_client',
     method: input.method,
     path: input.path,
+    protocol: input.protocol,
     status: input.status,
     timestamp,
     elapsedMs: timestamp - input.requestStartedAt
@@ -711,6 +718,7 @@ export function markClientRequestCompleted(input: {
 export function markClientRequestFailed(input: {
   method: string;
   path: string;
+  protocol?: string;
   message: string;
   requestStartedAt: number;
   timestamp?: number;
@@ -720,6 +728,7 @@ export function markClientRequestFailed(input: {
     type: 'failed_client',
     method: input.method,
     path: input.path,
+    protocol: input.protocol,
     message: input.message,
     timestamp,
     elapsedMs: timestamp - input.requestStartedAt

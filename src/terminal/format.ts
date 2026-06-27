@@ -25,8 +25,13 @@ export function formatCountdown(milliseconds: number): string {
 }
 
 // Mensagem amigavel de uma linha do log, ja colorida por tipo de evento.
+function clientTarget(entry: ApiRequestLogEvent): string {
+  const route = entry.path ? `${entry.method || ''} ${entry.path}`.trim() : '';
+  return [entry.protocol ? `[${entry.protocol}]` : '', route].filter(Boolean).join(' ');
+}
+
 export function usageMessage(entry: ApiRequestLogEvent): string {
-  const target = entry.path ? `${entry.method || ''} ${entry.path}`.trim() : '';
+  const target = clientTarget(entry);
   switch (entry.type) {
     case 'received':
       return c.muted(t('log.clientCalled', { target }));
