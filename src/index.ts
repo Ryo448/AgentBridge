@@ -187,15 +187,33 @@ async function invokeChat(
   const upstreamBody = options.localToolInstructions === false
     ? overridden
     : withLocalToolInstructions(overridden);
+
+  // Salva last_prompt.json sem clonar/consumir streams SSE em paralelo.
+  // Em streaming, o texto e capturado pelo proprio leitor que encaminha chunks.
+  const savedWithIp = clientIp || '127.0.0.1';
+  let promptSaved = false;
+  const savePromptEntry = (responseText: string) => {
+    if (promptSaved) return;
+    promptSaved = true;
+    void saveLastPrompt({
+      model: typeof body.model === 'string' ? body.model : '',
+      prompt: extractUserPrompt(body),
+      response: responseText,
+      clientIp: savedWithIp,
+      savedAt: ''
+    });
+  };
+
   const response = await forwardToNvidia(upstreamBody, fetch, undefined, {}, {
     resolveModel,
     enableHedge,
-    abortSignal: options.abortSignal
+    abortSignal: options.abortSignal,
+    onResponseText: savePromptEntry
   });
 
-  // Salva last_prompt.json apos resposta (sem bloquear o retorno ao cliente)
-  const savedWithIp = clientIp || '127.0.0.1';
-  void saveLastPromptAsync(response, body, savedWithIp);
+  if (!promptSaved && !(response.headers.get('content-type') || '').includes('text/event-stream')) {
+    void saveLastPromptAsync(response, body, savedWithIp, savePromptEntry);
+  }
 
   return response;
 }
@@ -242,7 +260,12 @@ async function invokeChatDirect(
 }
 
 // Extrai o texto de resposta assincrono do Response e salva no last_prompt.json
-async function saveLastPromptAsync(response: Response, body: Record<string, unknown>, clientIp: string) {
+async function saveLastPromptAsync(
+  response: Response,
+  body: Record<string, unknown>,
+  clientIp: string,
+  saveEntry?: (responseText: string) => void
+) {
   try {
     const cloned = response.clone();
     const contentType = cloned.headers.get('content-type') || '';
@@ -251,9 +274,12 @@ async function saveLastPromptAsync(response: Response, body: Record<string, unkn
       const json = await cloned.json() as Record<string, unknown>;
       responseText = extractResponseContent(json);
     } else if (contentType.includes('text/event-stream')) {
-      // Para streams SSE, le os primeiros bytes para capturar conteudo textual
-      const text = await cloned.text();
-      responseText = extractSseContent(text);
+      // Streams SSE sao capturados em forwardToNvidia para evitar tee/backpressure.
+      return;
+    }
+    if (saveEntry) {
+      saveEntry(responseText);
+      return;
     }
     void saveLastPrompt({
       model: typeof body.model === 'string' ? body.model : '',

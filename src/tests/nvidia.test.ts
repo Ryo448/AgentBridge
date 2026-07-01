@@ -148,6 +148,50 @@ test('NVIDIA forwarding closes streaming clients as soon as upstream sends DONE'
   assert.equal(await response.text(), 'data: [DONE]\n\n');
 });
 
+test('NVIDIA forwarding captures streamed response text without cloning the response', async () => {
+  clearRuntimeConfig();
+  setRuntimeConfig({ apiKeys: ['nvapi-capture-stream'], requestDelayMs: 0 });
+  let captured = '';
+  const fakeFetch: typeof fetch = async () => new Response([
+    'data: {"choices":[{"delta":{"content":"Oi"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}\n\n',
+    'data: [DONE]\n\n'
+  ].join(''), { headers: { 'content-type': 'text/event-stream' } });
+
+  const response = await forwardToNvidia(
+    { model: 'test', stream: true },
+    fakeFetch,
+    0,
+    {},
+    { onResponseText: (text) => { captured = text; } }
+  );
+
+  assert.equal(await response.text(), 'data: {"choices":[{"delta":{"content":"Oi"}}]}\n\ndata: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+  assert.equal(captured, 'Oi!');
+});
+
+test('NVIDIA forwarding captures aggregated response text for non-streaming clients', async () => {
+  clearRuntimeConfig();
+  setRuntimeConfig({ apiKeys: ['nvapi-capture-json'], requestDelayMs: 0 });
+  let captured = '';
+  const fakeFetch: typeof fetch = async () => new Response([
+    'data: {"choices":[{"delta":{"content":"Tudo"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":" certo"},"finish_reason":"stop"}]}\n\n',
+    'data: [DONE]\n\n'
+  ].join(''), { headers: { 'content-type': 'text/event-stream' } });
+
+  const response = await forwardToNvidia(
+    { model: 'test', stream: false },
+    fakeFetch,
+    0,
+    {},
+    { onResponseText: (text) => { captured = text; } }
+  );
+  const body = await response.json() as any;
+
+  assert.equal(body.choices[0].message.content, 'Tudo certo');
+  assert.equal(captured, 'Tudo certo');
+});
 test('NVIDIA forwarding logs upstream HTTP errors', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['nvapi-error'] });

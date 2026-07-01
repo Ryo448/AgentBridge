@@ -28,6 +28,7 @@ type ForwardOptions = {
   firstResponseTimeoutMs?: number;
   resolveModel?: (exhausted: string[]) => string | null;
   enableHedge?: boolean;
+  onResponseText?: (text: string) => void;
   // Sinal do cliente: quando o cliente cancela a request, este signal
   // e abortado e o proxy cancela todas as requests ativas (primario + backup).
   abortSignal?: AbortSignal;
@@ -109,7 +110,7 @@ function extractUsage(data: string): { totalTokens?: number; promptTokens?: numb
   }
 }
 
-function appendSseTextAndHasDone(state: { buffer: string; totalTokens?: number; promptTokens?: number; completionTokens?: number }, text: string) {
+function appendSseTextAndHasDone(state: { buffer: string; responseText: string; totalTokens?: number; promptTokens?: number; completionTokens?: number }, text: string) {
   state.buffer += text;
   while (true) {
     const boundary = state.buffer.search(/\r?\n\r?\n/);
@@ -133,6 +134,13 @@ function appendSseTextAndHasDone(state: { buffer: string; totalTokens?: number; 
         if (usage.promptTokens !== undefined) state.promptTokens = usage.promptTokens;
         if (usage.completionTokens !== undefined) state.completionTokens = usage.completionTokens;
       }
+      try {
+        const parsed = JSON.parse(data);
+        const content = parsed?.choices?.[0]?.delta?.content;
+        if (typeof content === 'string') state.responseText += content;
+      } catch {
+        // Ignora eventos SSE que nao sejam JSON de chat completion.
+      }
     }
   }
 }
@@ -145,14 +153,22 @@ function streamWithLogs(input: {
   attempt?: number;
   maxAttempts?: number;
   model?: string;
+  onResponseText?: (text: string) => void;
 }) {
   let firstEnqueued = false;
   let completed = false;
+  let responseTextReported = false;
   const decoder = new TextDecoder();
-  const sseState: { buffer: string; totalTokens?: number; promptTokens?: number; completionTokens?: number } = { buffer: '' };
+  const sseState: { buffer: string; responseText: string; totalTokens?: number; promptTokens?: number; completionTokens?: number } = { buffer: '', responseText: '' };
+  const reportResponseText = () => {
+    if (responseTextReported) return;
+    responseTextReported = true;
+    input.onResponseText?.(sseState.responseText);
+  };
   const markCompletedAndClose = async (controller: ReadableStreamDefaultController<Uint8Array>) => {
     if (completed) return;
     completed = true;
+    reportResponseText();
     markApiResponseCompleted({
       apiNumber: input.apiNumber,
       requestStartedAt: input.requestStartedAt,
@@ -203,12 +219,14 @@ function streamWithLogs(input: {
           maxAttempts: input.maxAttempts,
           message: error instanceof Error ? error.message : String(error)
         });
+        reportResponseText();
         controller.error(error);
       }
     },
     cancel() {
       if (completed) return;
       completed = true;
+      reportResponseText();
       markApiRequestCancelled({
         apiNumber: input.apiNumber,
         requestStartedAt: input.requestStartedAt,
@@ -301,7 +319,7 @@ async function readRemainingText(
   reader: ReadableStreamDefaultReader<Uint8Array>
 ) {
   const decoder = new TextDecoder();
-  const sseState: { buffer: string; totalTokens?: number; promptTokens?: number; completionTokens?: number } = { buffer: '' };
+  const sseState: { buffer: string; responseText: string; totalTokens?: number; promptTokens?: number; completionTokens?: number } = { buffer: '', responseText: '' };
   let text = firstChunk.length ? decoder.decode(firstChunk, { stream: true }) : '';
   if (firstChunk.length && appendSseTextAndHasDone(sseState, text)) {
     await reader.cancel().catch(() => {});
@@ -354,7 +372,8 @@ async function makeSuccessResponse(
   attempt: ModelAttempt,
   requestStartedAt: number,
   maxAttempts: number,
-  clientWantsStream: boolean
+  clientWantsStream: boolean,
+  onResponseText?: (text: string) => void
 ): Promise<Response> {
   if (clientWantsStream) {
     const headers = cloneHeaders(attempt.response);
@@ -366,7 +385,8 @@ async function makeSuccessResponse(
       requestStartedAt,
       attempt: 1,
       maxAttempts,
-      model: attempt.model
+      model: attempt.model,
+      onResponseText
     }), {
       status: attempt.response.status,
       statusText: attempt.response.statusText,
@@ -376,6 +396,7 @@ async function makeSuccessResponse(
 
   const text = await readRemainingText(attempt.firstChunk, attempt.reader);
   const completion = aggregateChatCompletion(parseSseEvents(text));
+  onResponseText?.(String(completion.choices?.[0]?.message?.content || ''));
   const usageInfo = (completion as { usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } }).usage;
   markApiResponseCompleted({
     apiNumber: attempt.apiNumber,
@@ -441,6 +462,7 @@ export async function forwardToNvidia(
   const clientWantsStream = Boolean(body.stream);
   const timeoutMs = options.firstResponseTimeoutMs ?? FIRST_RESPONSE_TIMEOUT_MS;
   const now = rateLimitOptions.now || Date.now;
+  const onResponseText = options.onResponseText;
   const requestStartedAt = now();
   const maxAttempts = Math.max(1, getApiKeyCount());
   let activeModel = typeof body.model === 'string' ? body.model : undefined;
@@ -491,7 +513,7 @@ export async function forwardToNvidia(
       const result = await hedgeForward(
         body, activeModel!, fetchImpl, timeoutMs, rateLimitOptions,
         attempt, maxAttempts, requestStartedAt, options.resolveModel,
-        upstreamBody, acquired, clientWantsStream, now, options.abortSignal
+        upstreamBody, acquired, clientWantsStream, now, options.abortSignal, onResponseText
       );
       if (result) return result;
       // undefined: erro 429 ou HTTP error que o loop externo pode tentar de novo
@@ -550,12 +572,13 @@ export async function forwardToNvidia(
         const headers = cloneHeaders(response);
         headers.set('content-type', 'text/event-stream');
         return new Response(streamWithLogs({
-          firstChunk: value, reader, apiNumber, requestStartedAt, attempt, maxAttempts, model: activeModel
+          firstChunk: value, reader, apiNumber, requestStartedAt, attempt, maxAttempts, model: activeModel, onResponseText: onResponseText
         }), { status: response.status, statusText: response.statusText, headers });
       }
 
       const text = await readRemainingText(value, reader);
       const completion = aggregateChatCompletion(parseSseEvents(text));
+      onResponseText?.(String(completion.choices?.[0]?.message?.content || ''));
       const usageInfo = (completion as { usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } }).usage;
       markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, totalTokens: usageInfo?.total_tokens, promptTokens: usageInfo?.prompt_tokens, completionTokens: usageInfo?.completion_tokens, model: activeModel, timestamp: now() });
       return Response.json(completion, { status: response.status, statusText: response.statusText, headers: { 'cache-control': 'no-store' } });
@@ -597,7 +620,8 @@ async function hedgeForward(
   acquired: { apiKey: string; apiNumber: number },
   clientWantsStream: boolean,
   now: () => number,
-  clientAbortSignal?: AbortSignal
+  clientAbortSignal?: AbortSignal,
+  onResponseText?: (text: string) => void
 ): Promise<Response | undefined> {
   const primaryApiNumber = acquired.apiNumber;
   const primaryAbort = new AbortController();
@@ -612,10 +636,9 @@ async function hedgeForward(
     ? () => { clientAbortSignal.addEventListener('abort', onClientAbort, { once: true }); }
     : () => {};
   abortListener();
-const cleanup = () => {
+  const cleanup = () => {
     if (clientAbortSignal) clientAbortSignal.removeEventListener('abort', onClientAbort);
   };
-  abortListener();
 
   // Se o cliente ja cancelou, aborta tudo
   if (clientAbortSignal?.aborted) {
@@ -698,7 +721,7 @@ const cleanup = () => {
 
     const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk, abortController: primaryAbort };
     cleanup();
-    return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream);
+    return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText);
   }
 
   // ---- Caso B: Hedge timeout! Primario nao respondeu HTTP em 60s ----
@@ -710,7 +733,7 @@ const cleanup = () => {
     cleanup();
     const httpResult = await primaryHttp;
     if (!httpResult) { cleanup(); return undefined; }
-    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now);
+    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText);
   }
   console.log(`[HEDGE] Backup modelo: ${backupModel}`);
 
@@ -735,7 +758,7 @@ const cleanup = () => {
     cleanup();
     const httpResult = await primaryHttp;
     if (!httpResult) { cleanup(); return undefined; }
-    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now);
+    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText);
   }
 
   // ---- Backup respondeu (HTTP 200 + primeiro chunk). Grace period. ----
@@ -773,7 +796,7 @@ const cleanup = () => {
         await backupAttempt.reader.cancel().catch(() => {});
         const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk: primaryChunk, abortController: primaryAbort };
         cleanup();
-        return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream);
+        return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText);
       }
 
       // Primario respondeu HTTP 200 mas chunk vazio — continua com backup
@@ -788,7 +811,7 @@ const cleanup = () => {
   try { await primaryHttp; } catch {}
   cleanup();
   markHedgedModelSwitch({ from: activeModel, to: backupAttempt.model, apiNumber: primaryApiNumber, timestamp: Date.now() });
-  return makeSuccessResponse(backupAttempt, requestStartedAt, maxAttempts, clientWantsStream);
+  return makeSuccessResponse(backupAttempt, requestStartedAt, maxAttempts, clientWantsStream, onResponseText);
 }
 
 // Processa o HTTP response do primario depois que ele respondeu
@@ -806,7 +829,8 @@ async function processPrimaryHttp(
   upstreamBody: Record<string, unknown>,
   acquired: { apiKey: string; apiNumber: number },
   clientWantsStream: boolean,
-  now: () => number
+  now: () => number,
+  onResponseText?: (text: string) => void
 ): Promise<Response | undefined> {
   const primaryApiNumber = acquired.apiNumber;
   const { response, reader } = httpResult;
@@ -840,7 +864,7 @@ async function processPrimaryHttp(
   }
 
   const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk, abortController: new AbortController() };
-  return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream);
+  return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText);
 }
 
 // doFetchWithModel: acquireApiKey + fetch + primeiro chunk, retorna null em erro
