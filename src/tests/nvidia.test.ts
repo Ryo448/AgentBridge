@@ -225,6 +225,30 @@ test('NVIDIA forwarding emits SSE keep-alives while streaming upstream is idle',
   await reader.cancel();
 });
 
+test('NVIDIA forwarding does not log local stream disposal as client cancellation', async () => {
+  clearRuntimeConfig();
+  setRuntimeConfig({ apiKeys: ['nvapi-local-dispose'], requestDelayMs: 0 });
+  const events: string[] = [];
+  const unsubscribe = onApiRequestLog((event) => {
+    events.push(event.type);
+  });
+  const encoder = new TextEncoder();
+  const fakeFetch: typeof fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Oi"}}]}\n\n'));
+    }
+  }), { headers: { 'content-type': 'text/event-stream' } });
+
+  const response = await forwardToNvidia({ model: 'test', stream: true }, fakeFetch, 0);
+  assert.ok(response.body);
+  const reader = response.body.getReader();
+  await reader.read();
+  await reader.cancel();
+  await Promise.resolve();
+
+  assert.equal(events.includes('cancelled'), false);
+  unsubscribe();
+});
 test('NVIDIA forwarding captures streamed response text without cloning the response', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['nvapi-capture-stream'], requestDelayMs: 0 });

@@ -165,6 +165,7 @@ function streamWithLogs(input: {
   model?: string;
   onResponseText?: (text: string) => void;
   keepAliveMs?: number;
+  abortSignal?: AbortSignal;
 }) {
   let firstEnqueued = false;
   let completed = false;
@@ -263,12 +264,14 @@ function streamWithLogs(input: {
       if (completed) return;
       completed = true;
       reportResponseText();
-      markApiRequestCancelled({
-        apiNumber: input.apiNumber,
-        requestStartedAt: input.requestStartedAt,
-        attempt: input.attempt,
-        maxAttempts: input.maxAttempts
-      });
+      if (input.abortSignal?.aborted) {
+        markApiRequestCancelled({
+          apiNumber: input.apiNumber,
+          requestStartedAt: input.requestStartedAt,
+          attempt: input.attempt,
+          maxAttempts: input.maxAttempts
+        });
+      }
       input.reader.cancel().catch(() => {});
     }
   });
@@ -410,7 +413,8 @@ async function makeSuccessResponse(
   maxAttempts: number,
   clientWantsStream: boolean,
   onResponseText?: (text: string) => void,
-  keepAliveMs?: number
+  keepAliveMs?: number,
+  abortSignal?: AbortSignal
 ): Promise<Response> {
   if (clientWantsStream) {
     const headers = cloneHeaders(attempt.response);
@@ -424,7 +428,8 @@ async function makeSuccessResponse(
       maxAttempts,
       model: attempt.model,
       onResponseText,
-      keepAliveMs
+      keepAliveMs,
+      abortSignal
     }), {
       status: attempt.response.status,
       statusText: attempt.response.statusText,
@@ -610,7 +615,7 @@ export async function forwardToNvidia(
         const headers = cloneHeaders(response);
         headers.set('content-type', 'text/event-stream');
         return new Response(streamWithLogs({
-          firstChunk: value, reader, apiNumber, requestStartedAt, attempt, maxAttempts, model: activeModel, onResponseText: onResponseText, keepAliveMs: options.streamKeepAliveMs
+          firstChunk: value, reader, apiNumber, requestStartedAt, attempt, maxAttempts, model: activeModel, onResponseText: onResponseText, keepAliveMs: options.streamKeepAliveMs, abortSignal: options.abortSignal
         }), { status: response.status, statusText: response.statusText, headers });
       }
 
@@ -759,7 +764,7 @@ async function hedgeForward(
 
     const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk, abortController: primaryAbort };
     cleanup();
-    return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText);
+    return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal);
   }
 
   // ---- Caso B: Hedge timeout! Primario nao respondeu HTTP em 60s ----
@@ -771,7 +776,7 @@ async function hedgeForward(
     cleanup();
     const httpResult = await primaryHttp;
     if (!httpResult) { cleanup(); return undefined; }
-    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText);
+    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText, clientAbortSignal);
   }
   console.log(`[HEDGE] Backup modelo: ${backupModel}`);
 
@@ -796,7 +801,7 @@ async function hedgeForward(
     cleanup();
     const httpResult = await primaryHttp;
     if (!httpResult) { cleanup(); return undefined; }
-    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText);
+    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText, clientAbortSignal);
   }
 
   // ---- Backup respondeu (HTTP 200 + primeiro chunk). Grace period. ----
@@ -834,7 +839,7 @@ async function hedgeForward(
         await backupAttempt.reader.cancel().catch(() => {});
         const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk: primaryChunk, abortController: primaryAbort };
         cleanup();
-        return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText);
+        return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal);
       }
 
       // Primario respondeu HTTP 200 mas chunk vazio — continua com backup
@@ -849,7 +854,7 @@ async function hedgeForward(
   try { await primaryHttp; } catch {}
   cleanup();
   markHedgedModelSwitch({ from: activeModel, to: backupAttempt.model, apiNumber: primaryApiNumber, timestamp: Date.now() });
-  return makeSuccessResponse(backupAttempt, requestStartedAt, maxAttempts, clientWantsStream, onResponseText);
+  return makeSuccessResponse(backupAttempt, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal);
 }
 
 // Processa o HTTP response do primario depois que ele respondeu
@@ -868,7 +873,8 @@ async function processPrimaryHttp(
   acquired: { apiKey: string; apiNumber: number },
   clientWantsStream: boolean,
   now: () => number,
-  onResponseText?: (text: string) => void
+  onResponseText?: (text: string) => void,
+  clientAbortSignal?: AbortSignal
 ): Promise<Response | undefined> {
   const primaryApiNumber = acquired.apiNumber;
   const { response, reader } = httpResult;
@@ -902,7 +908,7 @@ async function processPrimaryHttp(
   }
 
   const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk, abortController: new AbortController() };
-  return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText);
+  return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal);
 }
 
 // doFetchWithModel: acquireApiKey + fetch + primeiro chunk, retorna null em erro
