@@ -147,6 +147,50 @@ test('NVIDIA forwarding closes streaming clients as soon as upstream sends DONE'
 
   assert.equal(await response.text(), 'data: [DONE]\n\n');
 });
+test('NVIDIA forwarding closes streaming clients when upstream sends finish_reason without DONE', async () => {
+  clearRuntimeConfig();
+  setRuntimeConfig({ apiKeys: ['nvapi-finish-stream'], requestDelayMs: 0 });
+  const encoder = new TextEncoder();
+  let upstreamCancelled = false;
+  const fakeFetch: typeof fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"final"},"finish_reason":"stop"}]}\n\n'));
+    },
+    cancel() {
+      upstreamCancelled = true;
+    }
+  }), { headers: { 'content-type': 'text/event-stream' } });
+
+  const response = await forwardToNvidia({ model: 'test', stream: true }, fakeFetch, 0);
+
+  assert.equal(
+    await response.text(),
+    'data: {"choices":[{"delta":{"content":"final"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+  );
+  assert.equal(upstreamCancelled, true);
+});
+
+test('NVIDIA forwarding aggregates non-streaming clients when upstream sends finish_reason without DONE', async () => {
+  clearRuntimeConfig();
+  setRuntimeConfig({ apiKeys: ['nvapi-finish-json'], requestDelayMs: 0 });
+  const encoder = new TextEncoder();
+  let upstreamCancelled = false;
+  const fakeFetch: typeof fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"final"},"finish_reason":"stop"}]}\n\n'));
+    },
+    cancel() {
+      upstreamCancelled = true;
+    }
+  }), { headers: { 'content-type': 'text/event-stream' } });
+
+  const response = await forwardToNvidia({ model: 'test', stream: false }, fakeFetch, 0);
+  const body = await response.json() as any;
+
+  assert.equal(body.choices[0].message.content, 'final');
+  assert.equal(body.choices[0].finish_reason, 'stop');
+  assert.equal(upstreamCancelled, true);
+});
 test('NVIDIA forwarding emits SSE keep-alives while streaming upstream is idle', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['nvapi-keepalive'], requestDelayMs: 0 });

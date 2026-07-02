@@ -46,6 +46,9 @@ type ToolCallDraft = {
 
 const DEFAULT_STREAM_KEEP_ALIVE_MS = 5_000;
 const SSE_KEEP_ALIVE_CHUNK = new TextEncoder().encode(': keep-alive\n\n');
+const SSE_DONE_CHUNK = new TextEncoder().encode('data: [DONE]\n\n');
+
+type SseCompletionReason = false | 'done' | 'finish_reason';
 
 function timeoutError(milliseconds: number) {
   return new Error(`A API NVIDIA nao respondeu em ${Math.round(milliseconds / 1000)}s.`);
@@ -114,13 +117,14 @@ function extractUsage(data: string): { totalTokens?: number; promptTokens?: numb
   }
 }
 
-function appendSseTextAndHasDone(state: { buffer: string; responseText: string; totalTokens?: number; promptTokens?: number; completionTokens?: number }, text: string) {
+function appendSseTextAndCompletionReason(state: { buffer: string; responseText: string; totalTokens?: number; promptTokens?: number; completionTokens?: number }, text: string): SseCompletionReason {
+  let completionReason: SseCompletionReason = false;
   state.buffer += text;
   while (true) {
     const boundary = state.buffer.search(/\r?\n\r?\n/);
     if (boundary < 0) {
       state.buffer = state.buffer.slice(-256);
-      return false;
+      return completionReason;
     }
     const raw = state.buffer.slice(0, boundary);
     const separatorLength = state.buffer[boundary] === '\r' ? 4 : 2;
@@ -130,7 +134,7 @@ function appendSseTextAndHasDone(state: { buffer: string; responseText: string; 
       .filter((line) => line.startsWith('data:'))
       .map((line) => line.slice(5).trimStart())
       .join('\n');
-    if (data === '[DONE]') return true;
+    if (data === '[DONE]') return 'done';
     if (data) {
       const usage = extractUsage(data);
       if (usage) {
@@ -140,8 +144,10 @@ function appendSseTextAndHasDone(state: { buffer: string; responseText: string; 
       }
       try {
         const parsed = JSON.parse(data);
-        const content = parsed?.choices?.[0]?.delta?.content;
+        const choice = parsed?.choices?.[0];
+        const content = choice?.delta?.content;
         if (typeof content === 'string') state.responseText += content;
+        if (choice?.finish_reason) completionReason = 'finish_reason';
       } catch {
         // Ignora eventos SSE que nao sejam JSON de chat completion.
       }
@@ -176,9 +182,10 @@ function streamWithLogs(input: {
     responseTextReported = true;
     input.onResponseText?.(sseState.responseText);
   };
-  const markCompletedAndClose = async (controller: ReadableStreamDefaultController<Uint8Array>) => {
+  const markCompletedAndClose = async (controller: ReadableStreamDefaultController<Uint8Array>, appendDone = false) => {
     if (completed) return;
     completed = true;
+    if (appendDone) controller.enqueue(SSE_DONE_CHUNK);
     reportResponseText();
     markApiResponseCompleted({
       apiNumber: input.apiNumber,
@@ -200,11 +207,11 @@ function streamWithLogs(input: {
           firstEnqueued = true;
           if (input.firstChunk.length) {
             controller.enqueue(input.firstChunk);
-            const done = appendSseTextAndHasDone(
+            const completionReason = appendSseTextAndCompletionReason(
               sseState,
               decoder.decode(input.firstChunk, { stream: true })
             );
-            if (done) await markCompletedAndClose(controller);
+            if (completionReason) await markCompletedAndClose(controller, completionReason === 'finish_reason');
           }
           return;
         }
@@ -233,11 +240,11 @@ function streamWithLogs(input: {
         }
         if (value) {
           controller.enqueue(value);
-          const streamDone = appendSseTextAndHasDone(
+          const completionReason = appendSseTextAndCompletionReason(
             sseState,
             decoder.decode(value, { stream: true })
           );
-          if (streamDone) await markCompletedAndClose(controller);
+          if (completionReason) await markCompletedAndClose(controller, completionReason === 'finish_reason');
         }
       } catch (error) {
         if (completed) return;
@@ -350,7 +357,7 @@ async function readRemainingText(
   const decoder = new TextDecoder();
   const sseState: { buffer: string; responseText: string; totalTokens?: number; promptTokens?: number; completionTokens?: number } = { buffer: '', responseText: '' };
   let text = firstChunk.length ? decoder.decode(firstChunk, { stream: true }) : '';
-  if (firstChunk.length && appendSseTextAndHasDone(sseState, text)) {
+  if (firstChunk.length && appendSseTextAndCompletionReason(sseState, text)) {
     await reader.cancel().catch(() => {});
     text += decoder.decode();
     return text;
@@ -360,7 +367,7 @@ async function readRemainingText(
     if (done) break;
     const chunkText = decoder.decode(value, { stream: true });
     text += chunkText;
-    if (appendSseTextAndHasDone(sseState, chunkText)) {
+    if (appendSseTextAndCompletionReason(sseState, chunkText)) {
       await reader.cancel().catch(() => {});
       break;
     }
