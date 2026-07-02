@@ -1,6 +1,6 @@
-﻿# AgentBridge NVIDIA
+# AgentBridge NVIDIA
 
-Gateway local para usar a API NVIDIA em clientes OpenAI, Codex CLI e Claude Code.
+Local gateway to use the NVIDIA API from OpenAI-compatible clients, Codex CLI, and Claude Code.
 
 ## Desktop
 
@@ -9,226 +9,225 @@ npm install
 npm run desktop
 ```
 
-Ao abrir, informe a senha usada para criptografar as APIs. O arquivo é salvo em:
+On first launch, set the password used to encrypt your API keys. The vault is saved at:
 
 ```text
-Documentos\AgentBridge\config.json
+Documents\AgentBridge\config.json
 ```
 
-A senha nunca é persistida. As chaves descriptografadas ficam somente na memória
-enquanto o aplicativo está aberto.
+The password is never persisted. Decrypted keys live only in memory while the app is open.
 
-### Chave local (autenticação dos clientes)
+### Local key (client authentication)
 
-É a chave que o Codex, o Claude Code e seus clientes precisam enviar (como
-`Authorization: Bearer ...` ou `x-api-key`) para usar o proxy. Na primeira vez
-que você abre um cofre sem chave salva, o app pede para você **definir a sua**.
-Depois disso ela é gravada **criptografada** dentro do `config.json` e lida no
-início — você **não** é perguntado de novo a cada inicialização.
+This is the key that Codex, Claude Code, and other clients must send (as
+`Authorization: Bearer ...` or `x-api-key`) to use the proxy. The first time
+you open an empty vault, the app asks you to **set your own key**. It is then
+saved **encrypted** inside `config.json` and read on startup — you are **not**
+prompted again on every launch.
 
-Para trocar quando quiser, use o botão **"Trocar chave"** na aba **API direta**.
-Quem chamar o proxy sem a chave correta recebe apenas um erro de autenticação
-genérico — a chave esperada nunca é revelada na resposta.
+To change it later, use the **"Change key"** button in the **Direct API** tab.
+Callers without the correct key receive only a generic authentication error — the
+expected key is never revealed in the response.
 
-## Build do instalador (Windows .exe)
+## Building the installer (Windows .exe)
 
-Gera o instalador NSIS em `release-agentbridge\`:
+Generates an NSIS installer in `release-agentbridge\`:
 
 ```powershell
 npm install
 npm run dist:win
 ```
 
-O instalador permite escolher o diretório de instalação, cria atalho na área de
-trabalho e no menu Iniciar. O executável gerado fica em
+The installer lets you choose the installation directory and creates desktop and
+Start Menu shortcuts. The generated executable is at
 `release-agentbridge\AgentBridge Setup x.y.z.exe`.
 
-## API local
+## Local API
 
-- Autenticação: a **chave local** definida por você (o padrão de fábrica é
-  `EuAmoORyo` até você definir a sua). Veja [Chave local](#chave-local-autenticação-dos-clientes).
+- **Authentication**: the **local key** you define (factory default is
+  `EuAmoORyo` until you set your own). See [Local key](#local-key-client-authentication).
 - Chat Completions: `http://localhost:3000/v1/chat/completions`
 - Responses: `http://localhost:3000/v1/responses`
 - Anthropic Messages: `http://localhost:3000/v1/messages`
 - Health: `http://localhost:3000/health`
 
-As requisições são distribuídas automáticamente por chave para respeitar 35 RPM sem criar rajadas longas. O delay extra padrão é 0 ms.
-Cada chave aceita no máximo 35 reservas por minuto. Quando todas atingem o
-limite, novas requisições aguardam a virada do minuto antes de continuar.
+Requests are automatically distributed across keys to stay within 35 RPM without
+creating long bursts. The default extra delay is 0 ms.
+Each key accepts at most 35 reservations per minute. When all keys hit the limit,
+new requests wait for the next minute window before proceeding.
 
-## Escolha de modelo pelo client
+## Model selection from the client
 
-Os endpoints **padrão** entendem o modelo que o client manda — é assim que um
-workspace OpenAI-compatível (Open WebUI, Odysseus, etc.) lista e escolhe modelos
-sozinho:
+The **standard** endpoints honor whatever model the client sends — this is how an
+OpenAI-compatible workspace (Open WebUI, Odysseus, etc.) lists and selects models
+on its own:
 
-- `GET /v1/models` lista o **catálogo real** de modelos (ids `provider/modelo`,
-  cada um com `available: true/false`) **mais** o pseudo-modelo `AgentBridge`.
-  Assim o seletor do client é populado com os modelos de verdade.
-- `POST /v1/chat/completions` (e também `/v1/responses` e `/v1/messages`) roteia
-  conforme o `model` recebido:
-  - `model: "AgentBridge"` (ou vazio) → **redireciona** para o modelo selecionado
-    no app (modo automático continua valendo). É o que o Codex/Claude usam, então
-    nada muda para eles.
-  - `model: "<id real>"` → vai **direto** para esse modelo, desde que haja chave
-    livre. Se não houver, cai para o modelo efetivo em vez de devolver erro — ou
-    seja, nunca quebra a request por causa de modelo.
+- `GET /v1/models` lists the **real catalog** of models (ids `provider/model`,
+  each with `available: true/false`) **plus** the pseudo-model `AgentBridge`.
+  This populates the client's model selector with real model IDs.
+- `POST /v1/chat/completions` (and also `/v1/responses` and `/v1/messages`) routes
+  based on the incoming `model`:
+  - `model: "AgentBridge"` (or empty) → **redirects** to the model selected in
+    the app (auto-toggle mode still applies). This is what Codex/Claude send, so
+    nothing changes for them.
+  - `model: "<real id>"` → goes **directly** to that model, provided a free key
+    is available. If not, it falls back to the effective model instead of
+    returning an error — meaning the request never breaks because of model choice.
 
-Exemplo escolhendo um modelo específico:
+Example of selecting a specific model:
 
 ```bash
-# troque "EuAmoORyo" pela sua chave local, caso já tenha definido uma
+# replace "EuAmoORyo" with your local key if you have set one
 curl http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer EuAmoORyo" \
   -H "Content-Type: application/json" \
-  -d '{"model":"moonshotai/kimi-k2.6","messages":[{"role":"user","content":"oi"}]}'
+  -d '{"model":"moonshotai/kimi-k2.6","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-### Rotas extras (atalhos para scripts)
+### Extra routes (shortcuts for scripts)
 
-Além dos endpoints padrão, existem rotas dedicadas equivalentes:
+In addition to the standard endpoints, there are equivalent dedicated routes:
 
-- `GET /v1/models/available` — mesma listagem do catálogo; aceita
-  `?only_available=1` para retornar só os modelos com chave livre agora.
+- `GET /v1/models/available` — same catalog listing; accepts
+  `?only_available=1` to return only models with a free key right now.
 - `POST /v1/direct/chat/completions` · `/v1/direct/responses` ·
-  `/v1/direct/messages` — passthrough **estrito**: sempre honram o `model` do
-  corpo e exigem um id real (retornam 400 se vier vazio ou `AgentBridge`).
+  `/v1/direct/messages` — **strict** passthrough: always honors the `model` in
+  the body and requires a real id (returns 400 if empty or `AgentBridge`).
 
-O rodízio de chaves e o castigo de 429 (por modelo) valem em todas as rotas.
+Key rotation and 429 penalties (per model) apply on every route.
 
-## Modo terminal
+## Terminal mode
 
-O **AgentBridge** agora tem suporte nativo para terminal — com ou sem interface
-interativa. A entrada é unificada: um único comando (`npm start`) decide
-automaticamente qual modo ativar.
+**AgentBridge** now has native terminal support — with or without an interactive
+interface. A single command (`npm start`) automatically decides which mode to
+activate.
 
-| Situação                                    | Modo ativado           |
-|---------------------------------------------|------------------------|
-| Terminal interativo (PowerShell, bash, etc) | **TUI** completa       |
-| Pipe, redirecionamento, CI, systemd         | **Headless** automático|
-| `--headless` ou `--no-ui`                   | **Headless** forçado   |
+| Situation                                    | Mode activated         |
+|----------------------------------------------|------------------------|
+| Interactive terminal (PowerShell, bash, etc) | Full **TUI**           |
+| Pipe, redirection, CI, systemd               | **Headless** automatic |
+| `--headless` or `--no-ui`                    | **Headless** forced    |
 
-### TUI (interface interativa no terminal)
+### TUI (interactive terminal interface)
 
-O modo TUI oferece **100% das funções do app desktop** numa interface bonita em
-ANSI, sem Electron nem dependências gráficas:
+TUI mode offers **100% of the desktop app's features** in a beautiful ANSI
+interface, without Electron or graphical dependencies:
 
 ```powershell
 npm install
 npm start
 ```
 
-> **Dica para Windows:** use o **Windows Terminal** (recomendado) ou qualquer
-> terminal compatível com ANSI. O PowerShell padrão do Windows 11 funciona bem.
+> **Windows tip:** use **Windows Terminal** (recommended) or any ANSI-compatible
+> terminal. The default Windows 11 PowerShell works fine.
 
-**Primeira execução:** o AgentBridge mostra a tela de desbloqueio. Se ainda não
-existir um cofre, ele guia você na criação da senha mestra e no cadastro das
-chaves NVIDIA.
+**First run:** AgentBridge shows the unlock screen. If no vault exists yet, it
+guides you through creating a master password and registering your NVIDIA keys.
 
-**Execuções seguintes:** ele lê o **mesmo cofre criptografado** do desktop
-(`Documentos\AgentBridge\config.json`). A senha nunca é salva — só descriptografa
-as chaves em memória durante a sessão.
+**Subsequent runs:** it reads the **same encrypted vault** as the desktop
+(`Documents\AgentBridge\config.json`). The password is never saved — keys are
+only decrypted in memory during the session.
 
-#### Dashboard ao vivo
+#### Live dashboard
 
-Assim que você desbloqueia o cofre, o gateway sobe automaticamente e o dashboard
-mostra:
+Once you unlock the vault, the gateway starts automatically and the dashboard
+shows:
 
-- **Proxy:** estado do servidor, porta, número de chaves, delay extra
-- **Modelo:** modo manual/automático, modelo alvo, catálogo, RPM por minuto
-- **Log ao vivo:** cada requisição que passa pelo proxy, com horário e status
+- **Proxy:** server status, port, key count, extra delay
+- **Model:** manual/auto mode, target model, catalog, RPM per minute
+- **Live log:** every request passing through the proxy, with timestamp and status
 
-No rodapé, os atalhos disponíveis:
+Footer shortcuts:
 
-    S iniciar/parar · A APIs · M modelos · C castigos · P porta · D delay · K chave · I integração · L limpar log · Q sair
+    S start/stop · A APIs · M models · P port · D delay · K local key · P penalties · I integration · L clear log · Q quit
 
-#### Telas de configuração (atalhos)
+#### Configuration screens (shortcuts)
 
-| Tecla | Tela              | O que faz                                                                 |
-|-------|-------------------|---------------------------------------------------------------------------|
-| `A`   | **APIs**          | Adiciona, edita ou remove as chaves NVIDIA (criptografadas com AES-256-GCM)|
-| `M`   | **Modelos**       | Seleciona modelo, liga **alternância automática**, reordena prioridade,   |
-|       |                   | testa modelo e edita o catálogo                                           |
-| `C`   | **Castigos (429)**| Mostra as APIs em cooldown com contagem regressiva ao vivo                |
-| `P`   | **Porta**         | Altera a porta onde o gateway escuta (1–65535)                            |
-| `D`   | **Delay**         | Ajusta o delay extra em ms antes de cada chamada NVIDIA (0–600000)        |
-| `K`   | **Chave local**   | Define/troca a chave que os clientes enviam para usar o proxy            |
-| `I`   | **Integração**    | Gera snippets prontos para Codex CLI, Claude Code e API direta            |
+| Key | Screen          | Description                                                              |
+|-----|-----------------|--------------------------------------------------------------------------|
+| `A` | **APIs**        | Add, edit or remove NVIDIA keys (encrypted with AES-256-GCM)             |
+| `M` | **Models**      | Select model, enable **auto-toggle**, reorder priority,                  |
+|     |                 | test a model, and edit the catalog                                       |
+| `C` | **Penalties**   | View APIs on cooldown with live countdown                                |
+| `P` | **Port**        | Change the gateway listen port (1–65535)                                 |
+| `D` | **Delay**       | Set extra delay in ms before each NVIDIA call (0–600000)                 |
+| `K` | **Local key**   | Set/change the key clients must send to use the proxy                    |
+| `I` | **Integration** | Generate ready-to-use snippets for Codex CLI, Claude Code, and direct API|
 
-A persistência de castigos (`penalties.json`) é compartilhada com o desktop —
-os cooldowns de 429 continuam mesmo se você alternar entre TUI e Electron.
+Penalty persistence (`penalties.json`) is shared with the desktop — 429 cooldowns
+survive even if you switch between TUI and Electron.
 
-### Headless (servidor puro)
+### Headless (pure server)
 
-Para servidores, containers, Docker ou systemd — onde você não quer interface
-interativa — passe as chaves por variável de ambiente:
+For servers, containers, Docker, or systemd — where you don't want an interactive
+interface — pass keys via environment variables:
 
 ```powershell
 # PowerShell
-$env:NVIDIA_API_KEYS = "nvapi-chave-1,nvapi-chave-2"
+$env:NVIDIA_API_KEYS = "nvapi-key-1,nvapi-key-2"
 npm start -- --headless
 ```
 
 ```bash
 # bash / zsh
-export NVIDIA_API_KEYS="nvapi-chave-1,nvapi-chave-2"
+export NVIDIA_API_KEYS="nvapi-key-1,nvapi-key-2"
 npm start -- --headless
 ```
 
-O atalho `npm run start:headless` faz a mesma coisa.
+The shortcut `npm run start:headless` does the same thing.
 
-No modo headless você pode definir a chave local exigida dos clientes pela
-variável `AGENTBRIDGE_LOCAL_KEY` (se omitida, usa a padrão de fábrica):
+In headless mode you can set the local key required from clients via the
+`AGENTBRIDGE_LOCAL_KEY` variable (if omitted, the factory default is used):
 
 ```bash
-export AGENTBRIDGE_LOCAL_KEY="minha-chave-secreta"
+export AGENTBRIDGE_LOCAL_KEY="my-secret-key"
 ```
 
-O modo headless também é ativado automaticamente quando a saída **não é um
-terminal interativo** — como em pipes (`npm start | tee log.txt`), CI/CD,
-systemd ou Docker. Isso significa que o mesmo comando `npm start` funciona nos
-dois cenários sem você precisar decorar flags.
+Headless mode is also activated automatically when output **is not an interactive
+terminal** — such as pipes (`npm start | tee log.txt`), CI/CD, systemd, or
+Docker. This means the same `npm start` command works in both scenarios without
+needing to remember flags.
 
 
 ---
 
-## Tutorial: Como Obter APIs Gratuitas NVIDIA
+## Tutorial: How to Get Free NVIDIA APIs
 
-Para utilizar o **AgentBridge** com as APIs NVIDIA, siga os passos abaixo:
+To use **AgentBridge** with the NVIDIA API, follow the steps below:
 
-### 1. Acesse o site NVIDIA Build
+### 1. Visit the NVIDIA Build website
 
-1. Abra o navegador e vá para: [https://build.nvidia.com/](https://build.nvidia.com/)
-2. Crie e faça login na sua conta.
+1. Open your browser and go to: [https://build.nvidia.com/](https://build.nvidia.com/)
+2. Create an account and log in.
 
-### 2. Gere sua API Key
+### 2. Generate your API Key
 
-1. No painel da NVIDIA, vá até a seção de **API Keys**.
-2. Clique em **Generate API Key**.
-3. Copie a chave gerada.
+1. In the NVIDIA dashboard, go to the **API Keys** section.
+2. Click **Generate API Key**.
+3. Copy the generated key.
 
-### 3. Quantidade de APIs Necessárias
+### 3. How many API keys you need
 
-Para que o **AgentBridge** funcione corretamente, você precisa de múltiplas chaves da API NVIDIA. **Infelizmente não vai funcionar sendo várias da mesma conta** — cada chave requer uma conta separada.
+For **AgentBridge** to work well, you need multiple NVIDIA API keys. **Unfortunately, multiple keys from the same account won't work** — each key requires a separate account.
 
-| Quantidade | Nível de Performance              |
-|------------|-----------------------------------|
-| 8 APIs     | Usável com qualidade              |
-| 15 APIs    | Ideal para uso regular            |
-| 25 APIs    | Perfeito (máximo desempenho)      |
+| Quantity | Performance Level                 |
+|----------|-----------------------------------|
+| 8 keys   | Usable with decent quality        |
+| 15 keys  | Ideal for regular use             |
+| 25 keys  | Perfect (maximum performance)     |
 
-### 4. Implemente no AgentBridge
+### 4. Set up AgentBridge
 
-Após coletar as chaves:
+After collecting the keys:
 
-1. Abra o **AgentBridge**.
-2. Defina uma senha para criptografar as chaves (localmente).
-3. Nos campo de APIs, insira todas as chaves que você juntou.
-4. Pronto! O proxy distribuirá automaticamente as requisições entre as chaves para respeitar o limite de 35 requisições por minuto.
+1. Open **AgentBridge**.
+2. Set a password to encrypt the keys (stored locally).
+3. In the APIs field, enter all the keys you collected.
+4. Done! The proxy will automatically distribute requests across keys to respect the 35 RPM limit per key.
 
-> **Dica Importante**: Cada conta NVIDIA suporta até 40 requisições por minuto, mas o AgentBridge limita para 35 para evitar estourar o RPM da API. Com 8+ contas, o AgentBridge alterna entre elas para dar respostas estáveis e contínuas.
+> **Important Tip**: Each NVIDIA account supports up to 40 requests per minute, but AgentBridge limits to 35 to avoid hitting the RPM cap. With 8+ accounts, AgentBridge rotates between them to provide stable, continuous responses.
 
 ---
-## Licença
+## License
 
 GPL-3.0

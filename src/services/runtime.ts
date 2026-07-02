@@ -898,16 +898,8 @@ export async function acquireApiKey(options: AcquireApiKeyOptions = {}) {
     cursor = chosenIndex; // gruda na chave escolhida
     const state = apiKeyStates[chosenIndex];
 
-    // Protecao de 35 RPM NA chave atual (para nao estourar os ~40 reais da NVIDIA).
-    const rpmWaitMs = state.requestTimestamps.length >= NVIDIA_RPM_LIMIT
-      ? (state.requestTimestamps[0] + RATE_LIMIT_WINDOW_MS) - timestamp
-      : 0;
-    const waitMs = Math.max(0, rpmWaitMs);
-    if (waitMs > 0) {
-      markRateLimitWaiting({ waitMs, timestamp });
-      await sleep(waitMs);
-      continue; // reavalia; cursor inalterado, entao continua na MESMA chave
-    }
+    // Sem throttle local de RPM: a janela fica apenas como telemetria para a UI.
+    // Se a NVIDIA devolver 429, o fluxo de failover/castigo por modelo trata isso.
 
     state.requestTimestamps.push(timestamp);
     // NAO avanca o cursor: o fluxo segue na mesma chave ate ela levar 429.
@@ -936,7 +928,7 @@ export async function acquireApiKey(options: AcquireApiKeyOptions = {}) {
       apiKey: state.apiKey,
       apiNumber: usageEvent.apiNumber,
       requestsThisMinute: state.requestTimestamps.length,
-      remainingThisMinute: NVIDIA_RPM_LIMIT - state.requestTimestamps.length
+      remainingThisMinute: Math.max(0, NVIDIA_RPM_LIMIT - state.requestTimestamps.length)
     };
   }
 }

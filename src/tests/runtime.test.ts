@@ -18,7 +18,6 @@ import {
   pruneApiRequestLogs,
   setRuntimeConfig
 } from '../services/runtime.ts';
-import { RATE_LIMIT_WINDOW_MS } from '../config.ts';
 
 test('runtime sticks to the current key until it is penalized, then advances', async () => {
   clearRuntimeConfig();
@@ -125,7 +124,7 @@ test('runtime emits penalty events and restores penalties from disk', async () =
   clearRuntimeConfig();
 });
 
-test('runtime keeps all traffic on the current key and respects 35 RPM', async () => {
+test('runtime keeps all traffic on the current key without local RPM throttle', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['key-1', 'key-2'] });
   let now = 120_000;
@@ -145,13 +144,8 @@ test('runtime keeps all traffic on the current key and respects 35 RPM', async (
   }
   assert.equal(reservations.filter((item) => item.apiKey === 'key-1').length, 70);
   assert.equal(reservations.filter((item) => item.apiKey === 'key-2').length, 0);
-  // O limite de 35 RPM por chave continua sendo respeitado como protecao.
-  assert.ok(reservations.every((item) => item.requestsThisMinute <= 35));
-  // Sem pacing: as esperas sao apenas da janela de RPM quando atinge 35.
-  // Nenhuma espera deve ser menor ou igual ao intervalo de pacing (que era ~1714ms),
-  // pois todas as esperas restantes sao da reabertura da janela (60000ms).
-  const nonRpmSleeps = sleepCalls.filter((milliseconds) => milliseconds < RATE_LIMIT_WINDOW_MS);
-  assert.equal(nonRpmSleeps.length, 0);
+  assert.equal(reservations.at(-1)?.requestsThisMinute, 70);
+  assert.equal(sleepCalls.length, 0);
 });
 
 test('runtime keeps RPM window anchored after the wall-clock minute changes', async () => {
