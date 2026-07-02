@@ -147,6 +147,39 @@ test('NVIDIA forwarding closes streaming clients as soon as upstream sends DONE'
 
   assert.equal(await response.text(), 'data: [DONE]\n\n');
 });
+test('NVIDIA forwarding emits SSE keep-alives while streaming upstream is idle', async () => {
+  clearRuntimeConfig();
+  setRuntimeConfig({ apiKeys: ['nvapi-keepalive'], requestDelayMs: 0 });
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  let upstreamCancelled = false;
+  const fakeFetch: typeof fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Oi"}}]}\n\n'));
+    },
+    cancel() {
+      upstreamCancelled = true;
+    }
+  }), { headers: { 'content-type': 'text/event-stream' } });
+
+  const response = await forwardToNvidia(
+    { model: 'test', stream: true },
+    fakeFetch,
+    0,
+    {},
+    { streamKeepAliveMs: 5 }
+  );
+  assert.ok(response.body);
+  const reader = response.body.getReader();
+
+  const first = await reader.read();
+  assert.equal(decoder.decode(first.value), 'data: {"choices":[{"delta":{"content":"Oi"}}]}\n\n');
+  const keepAlive = await reader.read();
+  assert.equal(decoder.decode(keepAlive.value), ': keep-alive\n\n');
+  assert.equal(upstreamCancelled, false);
+
+  await reader.cancel();
+});
 
 test('NVIDIA forwarding captures streamed response text without cloning the response', async () => {
   clearRuntimeConfig();

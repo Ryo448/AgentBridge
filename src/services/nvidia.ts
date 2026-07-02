@@ -29,6 +29,7 @@ type ForwardOptions = {
   resolveModel?: (exhausted: string[]) => string | null;
   enableHedge?: boolean;
   onResponseText?: (text: string) => void;
+  streamKeepAliveMs?: number;
   // Sinal do cliente: quando o cliente cancela a request, este signal
   // e abortado e o proxy cancela todas as requests ativas (primario + backup).
   abortSignal?: AbortSignal;
@@ -42,6 +43,9 @@ type ToolCallDraft = {
     arguments: string;
   };
 };
+
+const DEFAULT_STREAM_KEEP_ALIVE_MS = 5_000;
+const SSE_KEEP_ALIVE_CHUNK = new TextEncoder().encode(': keep-alive\n\n');
 
 function timeoutError(milliseconds: number) {
   return new Error(`A API NVIDIA nao respondeu em ${Math.round(milliseconds / 1000)}s.`);
@@ -154,12 +158,19 @@ function streamWithLogs(input: {
   maxAttempts?: number;
   model?: string;
   onResponseText?: (text: string) => void;
+  keepAliveMs?: number;
 }) {
   let firstEnqueued = false;
   let completed = false;
   let responseTextReported = false;
+  let pendingRead: Promise<ReadableStreamReadResult<Uint8Array>> | null = null;
   const decoder = new TextDecoder();
   const sseState: { buffer: string; responseText: string; totalTokens?: number; promptTokens?: number; completionTokens?: number } = { buffer: '', responseText: '' };
+  const keepAliveMs = Math.max(1, input.keepAliveMs ?? DEFAULT_STREAM_KEEP_ALIVE_MS);
+  const getPendingRead = () => {
+    pendingRead ??= input.reader.read();
+    return pendingRead;
+  };
   const reportResponseText = () => {
     if (responseTextReported) return;
     responseTextReported = true;
@@ -197,7 +208,25 @@ function streamWithLogs(input: {
           }
           return;
         }
-        const { done, value } = await input.reader.read();
+        let keepAliveTimer: NodeJS.Timeout | undefined;
+        let readResult: { type: 'read'; result: ReadableStreamReadResult<Uint8Array> } | { type: 'keep_alive' };
+        try {
+          readResult = await Promise.race([
+            getPendingRead().then((result) => ({ type: 'read' as const, result })),
+            new Promise<{ type: 'keep_alive' }>((resolve) => {
+              keepAliveTimer = setTimeout(() => resolve({ type: 'keep_alive' }), keepAliveMs);
+            })
+          ]);
+        } finally {
+          if (keepAliveTimer) clearTimeout(keepAliveTimer);
+        }
+        if (readResult.type === 'keep_alive') {
+          controller.enqueue(SSE_KEEP_ALIVE_CHUNK);
+          return;
+        }
+
+        pendingRead = null;
+        const { done, value } = readResult.result;
         if (done) {
           await markCompletedAndClose(controller);
           return;
@@ -373,7 +402,8 @@ async function makeSuccessResponse(
   requestStartedAt: number,
   maxAttempts: number,
   clientWantsStream: boolean,
-  onResponseText?: (text: string) => void
+  onResponseText?: (text: string) => void,
+  keepAliveMs?: number
 ): Promise<Response> {
   if (clientWantsStream) {
     const headers = cloneHeaders(attempt.response);
@@ -386,7 +416,8 @@ async function makeSuccessResponse(
       attempt: 1,
       maxAttempts,
       model: attempt.model,
-      onResponseText
+      onResponseText,
+      keepAliveMs
     }), {
       status: attempt.response.status,
       statusText: attempt.response.statusText,
@@ -572,7 +603,7 @@ export async function forwardToNvidia(
         const headers = cloneHeaders(response);
         headers.set('content-type', 'text/event-stream');
         return new Response(streamWithLogs({
-          firstChunk: value, reader, apiNumber, requestStartedAt, attempt, maxAttempts, model: activeModel, onResponseText: onResponseText
+          firstChunk: value, reader, apiNumber, requestStartedAt, attempt, maxAttempts, model: activeModel, onResponseText: onResponseText, keepAliveMs: options.streamKeepAliveMs
         }), { status: response.status, statusText: response.statusText, headers });
       }
 
