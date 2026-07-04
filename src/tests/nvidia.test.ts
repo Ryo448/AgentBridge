@@ -15,7 +15,7 @@ test('NVIDIA forwarding sticks to the same key (no 429) and preserves streaming 
   const fakeFetch: typeof fetch = async (_input, init) => {
     authorizations.push(new Headers(init?.headers).get('authorization') || '');
     upstreamStreams.push(JSON.parse(String(init?.body || '{}')).stream);
-    return new Response('data: [DONE]\n\n', {
+    return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
       headers: { 'content-type': 'text/event-stream' }
     });
   };
@@ -26,7 +26,7 @@ test('NVIDIA forwarding sticks to the same key (no 429) and preserves streaming 
   assert.deepEqual(authorizations, ['Bearer nvapi-first', 'Bearer nvapi-first']);
   assert.deepEqual(upstreamStreams, [true, true]);
   assert.equal(first.headers.get('content-type'), 'text/event-stream');
-  assert.equal(await second.text(), 'data: [DONE]\n\n');
+  assert.equal(await second.text(), 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
 });
 
 test('NVIDIA forwarding waits before starting the upstream request', async () => {
@@ -76,7 +76,7 @@ test('NVIDIA forwarding aggregates upstream streaming for non-streaming clients 
     start(controller) {
       controller.enqueue(encoder.encode('data: {"id":"chatcmpl-1","created":1,"model":"test","choices":[{"delta":{"role":"assistant","content":"Oi"}}]}\n\n'));
       controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\n'));
-      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'));
       controller.close();
     }
   }), { headers: { 'content-type': 'text/event-stream' } });
@@ -118,7 +118,7 @@ test('NVIDIA forwarding finishes non-streaming clients as soon as upstream sends
     start(controller) {
       controller.enqueue(encoder.encode([
         'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n',
-        'data: [DONE]\n\n'
+        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
       ].join('')));
     }
   }), { headers: { 'content-type': 'text/event-stream' } });
@@ -135,13 +135,13 @@ test('NVIDIA forwarding closes streaming clients as soon as upstream sends DONE'
   const encoder = new TextEncoder();
   const fakeFetch: typeof fetch = async () => new Response(new ReadableStream({
     start(controller) {
-      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'));
     }
   }), { headers: { 'content-type': 'text/event-stream' } });
 
   const response = await forwardToNvidia({ model: 'test', stream: true }, fakeFetch);
 
-  assert.equal(await response.text(), 'data: [DONE]\n\n');
+  assert.equal(await response.text(), 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
 });
 test('NVIDIA forwarding closes streaming clients when upstream sends finish_reason without DONE', async () => {
   clearRuntimeConfig();
@@ -274,7 +274,7 @@ test('NVIDIA forwarding captures aggregated response text for non-streaming clie
   const fakeFetch: typeof fetch = async () => new Response([
     'data: {"choices":[{"delta":{"content":"Tudo"}}]}\n\n',
     'data: {"choices":[{"delta":{"content":" certo"},"finish_reason":"stop"}]}\n\n',
-    'data: [DONE]\n\n'
+    'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
   ].join(''), { headers: { 'content-type': 'text/event-stream' } });
 
   const response = await forwardToNvidia(
@@ -288,6 +288,39 @@ test('NVIDIA forwarding captures aggregated response text for non-streaming clie
 
   assert.equal(body.choices[0].message.content, 'Tudo certo');
   assert.equal(captured, 'Tudo certo');
+});
+test('NVIDIA forwarding silently retries empty non-streaming completions', async () => {
+  clearRuntimeConfig();
+  setRuntimeConfig({ apiKeys: ['nvapi-empty'], requestDelayMs: 0 });
+  const events: Array<{ type: string; status?: number; message?: string; model?: string }> = [];
+  const unsubscribe = onApiRequestLog((event) => {
+    events.push({ type: event.type, status: event.status, message: event.message, model: event.model });
+  });
+  let calls = 0;
+  const fakeFetch: typeof fetch = async () => {
+    calls++;
+    if (calls === 1) {
+      return new Response([
+        'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":0,"total_tokens":3}}\n\n',
+        'data: [DONE]\n\n'
+      ].join(''), { headers: { 'content-type': 'text/event-stream' } });
+    }
+    return new Response([
+      'data: {"choices":[{"delta":{"content":"real"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n',
+      'data: [DONE]\n\n'
+    ].join(''), { headers: { 'content-type': 'text/event-stream' } });
+  };
+
+  const response = await forwardToNvidia({ model: 'empty-model', stream: false }, fakeFetch, 0);
+  const body = await response.json() as any;
+
+  assert.equal(response.status, 200);
+  assert.equal(body.choices[0].message.content, 'real');
+  assert.equal(calls, 2);
+  const upstreamError = events.find((event) => event.type === 'upstream_error');
+  assert.equal(upstreamError?.status, 204);
+  assert.equal(upstreamError?.model, 'empty-model');
+  unsubscribe();
 });
 test('NVIDIA forwarding logs upstream HTTP errors', async () => {
   clearRuntimeConfig();
@@ -392,7 +425,7 @@ test('NVIDIA forwarding serializes the configured delay so sends are spaced apar
   const sendTimes: number[] = [];
   const fakeFetch: typeof fetch = async () => {
     sendTimes.push(now);
-    return new Response('data: [DONE]\n\n', {
+    return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
       headers: { 'content-type': 'text/event-stream' }
     });
   };
@@ -420,7 +453,7 @@ test('NVIDIA forwarding skips a penalized key on later requests (1h castigo)', a
         headers: { 'content-type': 'text/plain' }
       });
     }
-    return new Response('data: [DONE]\n\n', {
+    return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
       headers: { 'content-type': 'text/event-stream' }
     });
   };

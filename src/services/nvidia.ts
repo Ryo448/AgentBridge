@@ -28,7 +28,7 @@ type ForwardOptions = {
   firstResponseTimeoutMs?: number;
   resolveModel?: (exhausted: string[]) => string | null;
   enableHedge?: boolean;
-  onResponseText?: (text: string) => void;
+  onResponseText?: (text: string, model?: string) => void;
   streamKeepAliveMs?: number;
   // Sinal do cliente: quando o cliente cancela a request, este signal
   // e abortado e o proxy cancela todas as requests ativas (primario + backup).
@@ -163,7 +163,7 @@ function streamWithLogs(input: {
   attempt?: number;
   maxAttempts?: number;
   model?: string;
-  onResponseText?: (text: string) => void;
+  onResponseText?: (text: string, model?: string) => void;
   keepAliveMs?: number;
   abortSignal?: AbortSignal;
 }) {
@@ -181,7 +181,7 @@ function streamWithLogs(input: {
   const reportResponseText = () => {
     if (responseTextReported) return;
     responseTextReported = true;
-    input.onResponseText?.(sseState.responseText);
+    input.onResponseText?.(sseState.responseText, input.model);
   };
   const markCompletedAndClose = async (controller: ReadableStreamDefaultController<Uint8Array>, appendDone = false) => {
     if (completed) return;
@@ -353,6 +353,32 @@ function aggregateChatCompletion(events: any[]) {
   };
 }
 
+function completionHasOutput(completion: any) {
+  const message = completion?.choices?.[0]?.message;
+  const content = message?.content;
+  const hasText = typeof content === 'string' && content.trim().length > 0;
+  const hasToolCalls = Array.isArray(message?.tool_calls) && message.tool_calls.length > 0;
+  return hasText || hasToolCalls;
+}
+
+function emptyResponseMessage(model?: string) {
+  return `A NVIDIA retornou uma resposta vazia${model ? ` para o modelo ${model}` : ''}.`;
+}
+
+function ensureSseDone(text: string) {
+  if (/(^|\n)data:\s*\[DONE\]\s*$/m.test(text.trimEnd())) return text;
+  const separator = text.endsWith('\n\n') || text.endsWith('\r\n\r\n') ? '' : '\n\n';
+  return `${text}${separator}data: [DONE]\n\n`;
+}
+
+function sseTextHasOutput(text: string) {
+  try {
+    return completionHasOutput(aggregateChatCompletion(parseSseEvents(text)));
+  } catch {
+    return false;
+  }
+}
+
 async function readRemainingText(
   firstChunk: Uint8Array,
   reader: ReadableStreamDefaultReader<Uint8Array>
@@ -412,35 +438,39 @@ async function makeSuccessResponse(
   requestStartedAt: number,
   maxAttempts: number,
   clientWantsStream: boolean,
-  onResponseText?: (text: string) => void,
+  onResponseText?: (text: string, model?: string) => void,
   keepAliveMs?: number,
   abortSignal?: AbortSignal
-): Promise<Response> {
-  if (clientWantsStream) {
-    const headers = cloneHeaders(attempt.response);
-    headers.set('content-type', 'text/event-stream');
-    return new Response(streamWithLogs({
-      firstChunk: attempt.firstChunk,
-      reader: attempt.reader,
+): Promise<Response | undefined> {
+  const text = await readRemainingText(attempt.firstChunk, attempt.reader);
+  const completion = aggregateChatCompletion(parseSseEvents(text));
+  const usageInfo = (completion as { usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } }).usage;
+
+  if (!completionHasOutput(completion)) {
+    markApiUpstreamError({
+      apiNumber: attempt.apiNumber,
+      status: 204,
+      message: emptyResponseMessage(attempt.model),
+      requestStartedAt,
+      attempt: 1,
+      maxAttempts,
+      model: attempt.model
+    });
+    markApiResponseCompleted({
       apiNumber: attempt.apiNumber,
       requestStartedAt,
       attempt: 1,
       maxAttempts,
+      totalTokens: usageInfo?.total_tokens,
+      promptTokens: usageInfo?.prompt_tokens,
+      completionTokens: usageInfo?.completion_tokens,
       model: attempt.model,
-      onResponseText,
-      keepAliveMs,
-      abortSignal
-    }), {
-      status: attempt.response.status,
-      statusText: attempt.response.statusText,
-      headers
+      timestamp: Date.now()
     });
+    return undefined;
   }
 
-  const text = await readRemainingText(attempt.firstChunk, attempt.reader);
-  const completion = aggregateChatCompletion(parseSseEvents(text));
-  onResponseText?.(String(completion.choices?.[0]?.message?.content || ''));
-  const usageInfo = (completion as { usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } }).usage;
+  onResponseText?.(String(completion.choices?.[0]?.message?.content || ''), attempt.model);
   markApiResponseCompleted({
     apiNumber: attempt.apiNumber,
     requestStartedAt,
@@ -452,13 +482,23 @@ async function makeSuccessResponse(
     model: attempt.model,
     timestamp: Date.now()
   });
+
+  if (clientWantsStream) {
+    const headers = cloneHeaders(attempt.response);
+    headers.set('content-type', 'text/event-stream');
+    return new Response(ensureSseDone(text), {
+      status: attempt.response.status,
+      statusText: attempt.response.statusText,
+      headers
+    });
+  }
+
   return Response.json(completion, {
     status: attempt.response.status,
     statusText: attempt.response.statusText,
     headers: { 'cache-control': 'no-store' }
   });
 }
-
 // ---------------------------------------------------------------------------
 // Lê o primeiro chunk de um ReadableStream com timeout
 // ---------------------------------------------------------------------------
@@ -611,7 +651,7 @@ export async function forwardToNvidia(
 
       markApiSuccess({ apiNumber, model: activeModel, timestamp: now() });
 
-      if (clientWantsStream) {
+      if (clientWantsStream && sseTextHasOutput(new TextDecoder().decode(value))) {
         const headers = cloneHeaders(response);
         headers.set('content-type', 'text/event-stream');
         return new Response(streamWithLogs({
@@ -621,9 +661,33 @@ export async function forwardToNvidia(
 
       const text = await readRemainingText(value, reader);
       const completion = aggregateChatCompletion(parseSseEvents(text));
-      onResponseText?.(String(completion.choices?.[0]?.message?.content || ''));
       const usageInfo = (completion as { usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } }).usage;
+      if (!completionHasOutput(completion)) {
+        const message = emptyResponseMessage(activeModel);
+        markApiUpstreamError({ apiNumber, status: 204, message, requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
+        markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, totalTokens: usageInfo?.total_tokens, promptTokens: usageInfo?.prompt_tokens, completionTokens: usageInfo?.completion_tokens, model: activeModel, timestamp: now() });
+
+        if (options.resolveModel) {
+          const previousModel = activeModel;
+          if (activeModel) exhaustedModels.push(activeModel);
+          const nextModel = options.resolveModel(exhaustedModels.slice());
+          if (nextModel && !exhaustedModels.includes(nextModel)) {
+            markApiModelSwitch({ from: previousModel, to: nextModel, apiNumber, reason: 'resposta vazia', timestamp: now() });
+            activeModel = nextModel;
+            body = { ...body, model: nextModel };
+            attempt = 0;
+          }
+        }
+
+        continue;
+      }
+      onResponseText?.(String(completion.choices?.[0]?.message?.content || ''), activeModel);
       markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, totalTokens: usageInfo?.total_tokens, promptTokens: usageInfo?.prompt_tokens, completionTokens: usageInfo?.completion_tokens, model: activeModel, timestamp: now() });
+      if (clientWantsStream) {
+        const headers = cloneHeaders(response);
+        headers.set('content-type', 'text/event-stream');
+        return new Response(ensureSseDone(text), { status: response.status, statusText: response.statusText, headers });
+      }
       return Response.json(completion, { status: response.status, statusText: response.statusText, headers: { 'cache-control': 'no-store' } });
 
     } catch (error: any) {
@@ -873,7 +937,7 @@ async function processPrimaryHttp(
   acquired: { apiKey: string; apiNumber: number },
   clientWantsStream: boolean,
   now: () => number,
-  onResponseText?: (text: string) => void,
+  onResponseText?: (text: string, model?: string) => void,
   clientAbortSignal?: AbortSignal
 ): Promise<Response | undefined> {
   const primaryApiNumber = acquired.apiNumber;

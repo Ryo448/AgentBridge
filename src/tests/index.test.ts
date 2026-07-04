@@ -173,7 +173,7 @@ test('chat completions redireciona requests sem modelo para o modelo selecionado
   globalThis.fetch = async (_input, init) => {
     const request = JSON.parse(String(init?.body || '{}'));
     upstreamModel = request.model;
-    return new Response('data: [DONE]\n\n', {
+    return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
       headers: { 'content-type': 'text/event-stream' }
     });
   };
@@ -207,7 +207,7 @@ test('chat completions honra modelo real disponivel e cai para o efetivo quando 
   globalThis.fetch = async (_input, init) => {
     const request = JSON.parse(String(init?.body || '{}'));
     receivedModels.push(request.model);
-    return new Response('data: [DONE]\n\n', {
+    return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
       headers: { 'content-type': 'text/event-stream' }
     });
   };
@@ -386,7 +386,7 @@ test('client request logs include called protocol format', async () => {
   const unsubscribe = onApiRequestLog((event) => {
     if (event.type === 'received') protocols.push(event.protocol || '');
   });
-  globalThis.fetch = async () => new Response('data: [DONE]\n\n', {
+  globalThis.fetch = async () => new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
     headers: { 'content-type': 'text/event-stream' }
   });
 
@@ -450,7 +450,7 @@ test('chat completions keeps tool requests direct without local instruction inje
   let forwardedBody: any;
   globalThis.fetch = async (_input, init) => {
     forwardedBody = JSON.parse(String(init?.body || '{}'));
-    return new Response('data: [DONE]\n\n', {
+    return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
       headers: { 'content-type': 'text/event-stream' }
     });
   };

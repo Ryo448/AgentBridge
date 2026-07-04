@@ -1,0 +1,8 @@
+version: 4.2.4
+files:
+  - url: AgentBridge-Setup-4.2.4.exe
+    sha512: 4u9RpfCyvbsTnWaTH2jmv09j5sq5z4KpbMT0JCKD4aHntCTG+33clPoCywZJwWX7INmBKUrlnfpLKg6ED60lbA==
+    size: 94451316
+path: AgentBridge-Setup-4.2.4.exe
+sha512: 4u9RpfCyvbsTnWaTH2jmv09j5sq5z4KpbMT0JCKD4aHntCTG+33clPoCywZJwWX7INmBKUrlnfpLKg6ED60lbA==
+releaseDate: '2026-06-26T22:22:39.346Z'

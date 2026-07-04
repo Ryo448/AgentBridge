@@ -192,11 +192,11 @@ async function invokeChat(
   // Em streaming, o texto e capturado pelo proprio leitor que encaminha chunks.
   const savedWithIp = clientIp || '127.0.0.1';
   let promptSaved = false;
-  const savePromptEntry = (responseText: string) => {
+  const savePromptEntry = (responseText: string, finalModel?: string) => {
     if (promptSaved) return;
     promptSaved = true;
     void saveLastPrompt({
-      model: typeof body.model === 'string' ? body.model : '',
+      model: finalModel || target || (typeof body.model === 'string' ? body.model : ''),
       prompt: extractUserPrompt(body),
       response: responseText,
       clientIp: savedWithIp,
