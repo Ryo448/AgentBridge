@@ -20,7 +20,7 @@ const previewStatus = {
     ? window.agentBridgeModels.map((item) => item.model)
     : [],
   provider: 'NVIDIA',
-  appVersion: '4.2.3',
+  appVersion: '4.2.4',
   apiKey: 'EuAmoORyo',
   needLocalKey: false,
   codexBaseUrl: 'http://localhost:3000/v1',
