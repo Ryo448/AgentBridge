@@ -19,7 +19,7 @@ import {
   setRuntimeConfig
 } from '../services/runtime.ts';
 
-test('runtime sticks to the current key until it is penalized, then advances', async () => {
+test('runtime picks a key randomly on first use, then sticks until 429', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['key-1', 'key-2', 'key-3'] });
   let now = 500_000;
@@ -29,16 +29,26 @@ test('runtime sticks to the current key until it is penalized, then advances', a
       now += milliseconds;
     }
   };
-  // Sem 429, o fluxo gruda na chave atual.
-  assert.equal((await acquireApiKey(options)).apiKey, 'key-1');
-  assert.equal((await acquireApiKey(options)).apiKey, 'key-1');
-  // 429 na key-1 -> castigo de 1h e o fluxo segue a partir da key-2.
-  markApiRateLimited({ apiNumber: 1, timestamp: now });
-  assert.equal((await acquireApiKey(options)).apiKey, 'key-2');
-  assert.equal((await acquireApiKey(options)).apiKey, 'key-2');
-  // 429 na key-2 -> segue para a key-3.
-  markApiRateLimited({ apiNumber: 2, timestamp: now });
-  assert.equal((await acquireApiKey(options)).apiKey, 'key-3');
+  // Primeira chamada: sorteia uma das tres e gruda nela (sticky).
+  const first = (await acquireApiKey(options)).apiKey;
+  assert.ok(['key-1', 'key-2', 'key-3'].includes(first));
+  for (let i = 0; i < 19; i++) {
+    assert.equal((await acquireApiKey(options)).apiKey, first);
+  }
+  // 429 na chave atual: sorteia outra entre as elegiveis remanescentes.
+  const apiNumOf = (key: string) => Number(key.split('-')[1]);
+  markApiRateLimited({ apiNumber: apiNumOf(first), timestamp: now });
+  const second = (await acquireApiKey(options)).apiKey;
+  assert.notEqual(second, first);
+  // Gruda na nova ate outro 429.
+  for (let i = 0; i < 19; i++) {
+    assert.equal((await acquireApiKey(options)).apiKey, second);
+  }
+  // 429 na segunda: terceira chave e deterministica (unica elegivel).
+  markApiRateLimited({ apiNumber: apiNumOf(second), timestamp: now });
+  const third = (await acquireApiKey(options)).apiKey;
+  const remaining = ['key-1', 'key-2', 'key-3'].filter((k) => k !== first && k !== second);
+  assert.deepEqual(remaining, [third]);
   clearRuntimeConfig();
 });
 
@@ -53,18 +63,18 @@ test('runtime penalizes per model: 429 no Kimi nao bloqueia o Deepseek', async (
       now += milliseconds;
     }
   });
-  // Kimi gruda na key-1; ao tomar 429 no Kimi, a key-1 fica de castigo SO no Kimi.
-  assert.equal((await acquireApiKey(options('kimi'))).apiKey, 'key-1');
+  // Kimi: sortei entre as elegiveis. Ao tomar 429 no Kimi na key-1, so key-2 resta.
+  assert.ok(['key-1', 'key-2'].includes((await acquireApiKey(options('kimi'))).apiKey));
   markApiRateLimited({ apiNumber: 1, model: 'kimi', timestamp: now });
-  // Kimi agora segue na key-2 (key-1 de castigo no Kimi).
+  // Kimi agora segue na key-2 (key-1 de castigo no Kimi, unica elegivel).
   assert.equal((await acquireApiKey(options('kimi'))).apiKey, 'key-2');
   // key-2 tambem leva 429 no Kimi -> nenhuma chave atende o Kimi.
   markApiRateLimited({ apiNumber: 2, model: 'kimi', timestamp: now });
   await assert.rejects(() => acquireApiKey(options('kimi')), /castigo/);
 
-  // O Deepseek nao foi penalizado em nenhuma chave: continua elegivel, sem cooldown
-  // por causa da troca de modelo. A chave 1 segue chamavel no Deepseek.
-  assert.equal((await acquireApiKey(options('deepseek'))).apiKey, 'key-1');
+  // O Deepseek nao foi penalizado em nenhuma chave: ambas elegiveis, escolha
+  // aleatoria entre key-1 e key-2.
+  assert.ok(['key-1', 'key-2'].includes((await acquireApiKey(options('deepseek'))).apiKey));
 
   // A mesma API pode acumular castigo em mais de um modelo (Kimi + Deepseek).
   markApiRateLimited({ apiNumber: 1, model: 'deepseek', timestamp: now });
@@ -88,9 +98,9 @@ test('runtime throws AllKeysRestingError when every key is in penalty', async ()
   markApiRateLimited({ apiNumber: 1, timestamp: now });
   markApiRateLimited({ apiNumber: 2, timestamp: now });
   await assert.rejects(() => acquireApiKey(options), /castigo/);
-  // Uma hora depois a primeira chave volta a ficar disponivel.
+  // Uma hora depois ambas as chaves voltam a ficar disponiveis (escolha aleatoria).
   now += 60 * 60_000 + 1;
-  assert.equal((await acquireApiKey(options)).apiKey, 'key-1');
+  assert.ok(['key-1', 'key-2'].includes((await acquireApiKey(options)).apiKey));
   clearRuntimeConfig();
 });
 
@@ -124,12 +134,12 @@ test('runtime emits penalty events and restores penalties from disk', async () =
   clearRuntimeConfig();
 });
 
-test('runtime keeps all traffic on the current key without local RPM throttle', async () => {
+test('runtime sticks to one key per model until 429, independent cursors per model', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['key-1', 'key-2'] });
   let now = 120_000;
   const sleepCalls: number[] = [];
-  const options = {
+  const baseOpts = {
     now: () => now,
     sleep: async (milliseconds: number) => {
       sleepCalls.push(milliseconds);
@@ -137,14 +147,31 @@ test('runtime keeps all traffic on the current key without local RPM throttle', 
     }
   };
 
-  // Sticky: sem 429, todo o trafego fica na key-1 e a key-2 espera a vez dela.
-  const reservations = [];
-  for (let index = 0; index < 70; index++) {
-    reservations.push(await acquireApiKey(options));
+  // Modelo A: gruda na mesma chave ate 429 (sticky por modelo).
+  const firstPick = (await acquireApiKey({ ...baseOpts, model: 'a' })).apiKey;
+  for (let i = 0; i < 50; i++) {
+    assert.equal((await acquireApiKey({ ...baseOpts, model: 'a' })).apiKey, firstPick);
   }
-  assert.equal(reservations.filter((item) => item.apiKey === 'key-1').length, 70);
-  assert.equal(reservations.filter((item) => item.apiKey === 'key-2').length, 0);
-  assert.equal(reservations.at(-1)?.requestsThisMinute, 70);
+
+  // Modelo B: tem cursor proprio -- pode cair em chave diferente de A.
+  const secondPick = (await acquireApiKey({ ...baseOpts, model: 'b' })).apiKey;
+  for (let i = 0; i < 50; i++) {
+    assert.equal((await acquireApiKey({ ...baseOpts, model: 'b' })).apiKey, secondPick);
+  }
+
+  // Voltar ao modelo A: continua na chave original (nao foi removida por usar B).
+  for (let i = 0; i < 20; i++) {
+    assert.equal((await acquireApiKey({ ...baseOpts, model: 'a' })).apiKey, firstPick);
+  }
+
+  // 429 no modelo A na chave atual: sorteia outra (a que sobrou).
+  markApiRateLimited({ apiNumber: firstPick === 'key-1' ? 1 : 2, model: 'a', timestamp: now });
+  const after429 = (await acquireApiKey({ ...baseOpts, model: 'a' })).apiKey;
+  assert.notEqual(after429, firstPick);
+
+  // Modelo B segue ileso na chave dele (independencia de castigo).
+  assert.equal((await acquireApiKey({ ...baseOpts, model: 'b' })).apiKey, secondPick);
+
   assert.equal(sleepCalls.length, 0);
 });
 
@@ -210,7 +237,7 @@ test('runtime reports current-minute usage and which API was selected', async ()
       now += milliseconds;
     }
   };
-  setRuntimeConfig({ apiKeys: ['key-1', 'key-2'] });
+  setRuntimeConfig({ apiKeys: ['key-1'] });
 
   await acquireApiKey(options);
   await acquireApiKey(options);
@@ -218,7 +245,7 @@ test('runtime reports current-minute usage and which API was selected', async ()
 
   const status = getRuntimeStatus(now);
   assert.equal(status.requestsThisMinute, 3);
-  assert.deepEqual(status.apiUsage.map((item) => item.requestsThisMinute), [3, 0]);
+  assert.deepEqual(status.apiUsage.map((item) => item.requestsThisMinute), [3]);
   assert.deepEqual(
     events.map((event) => [event.apiNumber, event.totalRequestsThisMinute]),
     [[1, 1], [1, 2], [1, 3]]

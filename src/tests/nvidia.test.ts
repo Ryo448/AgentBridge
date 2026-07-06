@@ -7,7 +7,7 @@ import {
   setRuntimeConfig
 } from '../services/runtime.ts';
 
-test('NVIDIA forwarding sticks to the same key (no 429) and preserves streaming responses', async () => {
+test('NVIDIA forwarding picks a key among the available ones (no 429) and preserves streaming responses', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['nvapi-first', 'nvapi-second'] });
   const authorizations: string[] = [];
@@ -23,7 +23,9 @@ test('NVIDIA forwarding sticks to the same key (no 429) and preserves streaming 
   const first = await forwardToNvidia({ model: 'test', stream: true }, fakeFetch, 0);
   const second = await forwardToNvidia({ model: 'test', stream: true }, fakeFetch, 0);
 
-  assert.deepEqual(authorizations, ['Bearer nvapi-first', 'Bearer nvapi-first']);
+  const validKeys = ['Bearer nvapi-first', 'Bearer nvapi-second'];
+  assert.ok(authorizations.every((auth) => validKeys.includes(auth)));
+  assert.equal(authorizations.length, 2);
   assert.deepEqual(upstreamStreams, [true, true]);
   assert.equal(first.headers.get('content-type'), 'text/event-stream');
   assert.equal(await second.text(), 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
@@ -382,12 +384,21 @@ test('NVIDIA forwarding fails over to the next key on HTTP 429', async () => {
     );
   };
 
-  const response = await forwardToNvidia({ model: 'test', stream: false }, fakeFetch, 0);
-  const body = await response.json() as any;
+  // Loop ate `nvapi-limited` ser sorteada, levar 429 e falhar para `nvapi-spare`.
+  let response: Response = new Response(null, { status: 503 });
+  let body: any = {};
+  for (let attempt = 0; attempt < 20; attempt++) {
+    authorizations.length = 0;
+    events.length = 0;
+    response = await forwardToNvidia({ model: 'test', stream: false }, fakeFetch, 0);
+    body = await response.json() as any;
+    if (authorizations.includes('Bearer nvapi-limited')) break;
+  }
 
   assert.equal(response.status, 200);
   assert.equal(body.choices[0].message.content, 'ok');
-  assert.deepEqual(authorizations, ['Bearer nvapi-limited', 'Bearer nvapi-spare']);
+  assert.ok(authorizations.includes('Bearer nvapi-limited'));
+  assert.ok(authorizations.includes('Bearer nvapi-spare'));
   assert.ok(events.includes('upstream_error'));
   assert.equal(events.filter((type) => type === 'called').length, 2);
   unsubscribe();
@@ -409,7 +420,9 @@ test('NVIDIA forwarding returns 429 only after every key is rate limited', async
   const response = await forwardToNvidia({ model: 'test' }, fakeFetch, 0);
 
   assert.equal(response.status, 429);
-  assert.deepEqual(authorizations, ['Bearer nvapi-a', 'Bearer nvapi-b']);
+  assert.ok(authorizations.includes('Bearer nvapi-a'));
+  assert.ok(authorizations.includes('Bearer nvapi-b'));
+  assert.equal(authorizations.length, 2);
 });
 
 test('NVIDIA forwarding serializes the configured delay so sends are spaced apart', async () => {
@@ -458,8 +471,13 @@ test('NVIDIA forwarding skips a penalized key on later requests (1h castigo)', a
     });
   };
 
-  // Request 1: key1 leva 429 -> failover para key2; key1 entra de castigo por 1h.
-  await forwardToNvidia({ model: 'test', stream: true }, fakeFetch, 0);
+  // Loop ate `nvapi-one` ser sorteada e entrar em castigo (determinismo).
+  for (let attempt = 0; attempt < 20; attempt++) {
+    authorizations.length = 0;
+    await forwardToNvidia({ model: 'test', stream: true }, fakeFetch, 0);
+    if (authorizations.includes('Bearer nvapi-one')) break;
+  }
+  assert.ok(authorizations.includes('Bearer nvapi-one'));
   // Request 2: vai DIRETO para key2, sem desperdicar uma chamada na key1 de castigo.
   authorizations.length = 0;
   await forwardToNvidia({ model: 'test', stream: true }, fakeFetch, 0);

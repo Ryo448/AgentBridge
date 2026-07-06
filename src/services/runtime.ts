@@ -127,9 +127,14 @@ let autoToggle = false;
 // Ordem de prioridade do failover automatico (ids "provider/modelo").
 let modelPriority: string[] = [];
 // Ultimo modelo realmente colocado em uso (modo automatico): serve para exibir na
-// UI e para resetar o cursor "comecando da 1" quando o modelo efetivo muda.
+// UI. O rodizio de chaves agora e POR MODELO: cada modelo gruda na sua chave
+// atual ate ela levar 429; trocar de modelo nao mexe no cursor do outro.
 let activeModel = DEFAULT_MODEL;
-let cursor = 0;
+// Cursor sticky POR MODELO: cada modelo lembra o indice da chave que estava
+// usando. A primeira vez que um modelo aparece, sorteia uma chave elegivel
+// aleatoriamente (para nao comecar sempre na chave 0 e cansa-la). Depois gruda
+// nela ate receber 429 -- quando isso acontece, sorteia outra elegivel.
+let modelCursors = new Map<string, number>();
 let nextSendAt = 0;
 // Estado sticky do hedge: quando o backup vence porque o primario foi lento,
 // guardamos o modelo backup aqui e quantas requests ainda faltam para voltar
@@ -191,12 +196,12 @@ export function setRuntimeConfig(config: {
   if (typeof config.localApiKey === 'string' && config.localApiKey.trim()) {
     localApiKey = config.localApiKey.trim();
   }
-  cursor = 0;
+  modelCursors = new Map();
 }
 
 export function clearRuntimeConfig() {
   apiKeyStates = [];
-  cursor = 0;
+  modelCursors = new Map();
   nextSendAt = 0;
   requestDelayMs = REQUEST_DELAY_MS;
   selectedModel = DEFAULT_MODEL;
@@ -291,7 +296,8 @@ export function isModelAvailable(model: string, timestamp = Date.now()): boolean
 // Modelo efetivo de uma request. No modo manual, sempre o modelo fixo. No modo
 // automatico, reavalia a lista de prioridades DO TOPO a cada chamada (por isso o
 // proxy volta sozinho para o modelo de maior prioridade assim que ele libera uma
-// chave). Ao trocar o modelo efetivo, reseta o cursor para "comecar da 1 de novo".
+// chave). O rodizio de chaves e por modelo, entao trocar de modelo efetivo nao
+// reseta mais o cursor -- cada modelo lembra a chave que estava usando.
 export function getEffectiveModel(timestamp = Date.now()): string {
   let chosen: string;
   if (autoToggle && modelPriority.length) {
@@ -311,7 +317,6 @@ export function getEffectiveModel(timestamp = Date.now()): string {
   chosen = chosen.trim() || DEFAULT_MODEL;
   if (chosen !== activeModel) {
     activeModel = chosen;
-    cursor = 0; // novo modelo: recomeca o rodizio de chaves a partir da primeira
   }
   return chosen;
 }
@@ -588,9 +593,29 @@ export function markApiRateLimited(input: {
   // zera agora: zera so quando o castigo expirar (resetExpiredWindow).
   const successesBefore429 = state.successCounts.get(model) || 0;
   state.penalties.set(model, { penaltyStartedAt: timestamp, penaltyUntil, successesBefore429 });
-  // O fluxo passa a seguir a partir da PROXIMA chave: avanca o cursor sticky.
+  // A chave que levou 429 sai do rodizio deste modelo. Sorteia outra elegivel
+  // (que nao esteja de castigo neste modelo) para ser a nova chave sticky. Se
+  // nenhuma outra estiver livre para este modelo, o cursor fica no proximo
+  // indice -- quando expirar o castigo ou outro modelo liberar, acquireApiKey
+  // reavalia. O castigo e por (chave, modelo) e roda em paralelo.
+  const current = modelCursors.get(model);
   if (apiKeyStates.length > 0) {
-    cursor = (index + 1) % apiKeyStates.length;
+    const startSearch = current !== undefined
+      ? current
+      : Math.floor(Math.random() * apiKeyStates.length);
+    let next = startSearch;
+    let firstEligible = -1;
+    for (let offset = 0; offset < apiKeyStates.length; offset++) {
+      const probe = (startSearch + offset) % apiKeyStates.length;
+      if (index === probe) continue;
+      const probeState = apiKeyStates[probe];
+      if (!isResting(probeState, timestamp, model)) {
+        firstEligible = probe;
+        break;
+      }
+    }
+    next = firstEligible >= 0 ? firstEligible : (index + 1) % apiKeyStates.length;
+    modelCursors.set(model, next);
   }
   const penaltyEvent: ApiKeyPenaltyEvent = {
     apiNumber: input.apiNumber,
@@ -864,19 +889,17 @@ export async function acquireApiKey(options: AcquireApiKeyOptions = {}) {
     }
 
     const timestamp = now();
+    const key = modelKey(model);
 
-    // Selecao "sticky": a partir do cursor, fica na PRIMEIRA chave que nao esteja
-    // de castigo (429) PARA ESTE MODELO e gruda nela. Uma chave de castigo no Kimi
-    // continua elegivel para o Deepseek. So mudamos de chave quando a atual leva um
-    // 429 (markApiRateLimited avanca o cursor). As demais so esperam a vez delas.
-    let chosenIndex = -1;
+    // Coleta todas as chaves elegiveis (nao em castigo para este modelo) e o
+    // menor tempo de espera entre as de castigo (para a mensagem de erro).
+    const eligibleIndices: number[] = [];
     let shortestPenaltyWaitMs = Number.POSITIVE_INFINITY;
-    for (let offset = 0; offset < apiKeyStates.length; offset++) {
-      const index = (cursor + offset) % apiKeyStates.length;
+    for (let index = 0; index < apiKeyStates.length; index++) {
       const state = apiKeyStates[index];
       resetExpiredWindow(state, timestamp);
       if (isResting(state, timestamp, model)) {
-        const penalty = state.penalties.get(modelKey(model));
+        const penalty = state.penalties.get(key);
         if (penalty) {
           shortestPenaltyWaitMs = Math.min(
             shortestPenaltyWaitMs,
@@ -885,24 +908,37 @@ export async function acquireApiKey(options: AcquireApiKeyOptions = {}) {
         }
         continue;
       }
-      chosenIndex = index;
-      break;
+      eligibleIndices.push(index);
     }
 
-    if (chosenIndex === -1) {
+    if (eligibleIndices.length === 0) {
       // Todas as chaves estao de castigo. Em vez de segurar a request por ate 1 hora,
       // devolvemos um erro para o cliente reenviar mais tarde.
       throw new AllKeysRestingError(Math.max(1, Math.ceil(shortestPenaltyWaitMs)));
     }
 
-    cursor = chosenIndex; // gruda na chave escolhida
+    // Sticky por modelo: gruda na chave salva para este modelo. Se ainda nao
+    // existe cursor para o modelo, ou a salva nao esta mais elegivel (saiu do
+    // castigo e voltou, mas markApiRateLimited ja deve ter trocado), sorteia
+    // uma aleatoria entre as elegiveis. Enquanto a salva estiver elegivel, usa
+    // ela sem mudar -- soh troca quando recebe 429 (markApiRateLimited).
+    const saved = modelCursors.get(key);
+    let chosenIndex = -1;
+    if (saved !== undefined && eligibleIndices.includes(saved)) {
+      chosenIndex = saved;
+    } else {
+      chosenIndex = eligibleIndices.length === 1
+        ? eligibleIndices[0]
+        : eligibleIndices[Math.floor(Math.random() * eligibleIndices.length)];
+      modelCursors.set(key, chosenIndex);
+    }
+
     const state = apiKeyStates[chosenIndex];
 
     // Sem throttle local de RPM: a janela fica apenas como telemetria para a UI.
     // Se a NVIDIA devolver 429, o fluxo de failover/castigo por modelo trata isso.
 
     state.requestTimestamps.push(timestamp);
-    // NAO avanca o cursor: o fluxo segue na mesma chave ate ela levar 429.
     const totalRequestsThisMinute = totalRequests(timestamp);
     const usageEvent = {
       apiNumber: chosenIndex + 1,
