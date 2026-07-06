@@ -20,7 +20,7 @@ const previewStatus = {
     ? window.agentBridgeModels.map((item) => item.model)
     : [],
   provider: 'NVIDIA',
-  appVersion: '4.3.0',
+  appVersion: '4.3.1',
   apiKey: 'EuAmoORyo',
   needLocalKey: false,
   codexBaseUrl: 'http://localhost:3000/v1',
@@ -187,7 +187,6 @@ function renderUsageTerminal(status) {
     fragment.append(line);
   });
   elements.usageTerminalOutput.replaceChildren(fragment);
-  elements.usageTerminalOutput.scrollTop = elements.usageTerminalOutput.scrollHeight;
 }
 
 function formatCountdown(milliseconds) {
