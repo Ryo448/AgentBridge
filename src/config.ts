@@ -29,7 +29,8 @@ export const DEFAULT_MODEL_PRICES: Record<string, { input: number; output: numbe
   'moonshotai/kimi-k2.6': { input: 0.66, output: 3.50 },
   'nvidia/nemotron-3-ultra-550b-a55b': { input: 0.50, output: 2.20 },
   'minimaxai/minimax-m3': { input: 0.30, output: 1.20 },
-  'qwen/qwen3.5-397b-a17b': { input: 0.385, output: 2.45 }
+  'qwen/qwen3.5-397b-a17b': { input: 0.385, output: 2.45 },
+  'z-ai/glm-5.2': { input: 0.93, output: 3 }
 };
 
 // Catalogo de modelos desativados (vazio por padrao). Modelos desativados nao
@@ -45,7 +46,8 @@ export const DEFAULT_MODEL_CATALOG: ModelCatalogEntry[] = [
   { label: 'Deepseek v4 flash', model: 'deepseek-ai/deepseek-v4-flash', icon: 'deepseek', inputPrice: 0.09, outputPrice: 0.18 },
   { label: 'Nemotron', model: 'nvidia/nemotron-3-ultra-550b-a55b', icon: 'nemotron', inputPrice: 0.50, outputPrice: 2.20 },
   { label: 'Qwen', model: 'qwen/qwen3.5-397b-a17b', icon: 'qwen', inputPrice: 0.385, outputPrice: 2.45 },
-  { label: 'Minimax M3', model: 'minimaxai/minimax-m3', icon: 'minimax', inputPrice: 0.30, outputPrice: 1.20 }
+  { label: 'Minimax M3', model: 'minimaxai/minimax-m3', icon: 'minimax', inputPrice: 0.30, outputPrice: 1.20 },
+  { label: 'GLM 5.2', model: 'z-ai/glm-5.2', icon: '', inputPrice: 0.93, outputPrice: 3 }
 ];
 
 // Ordem de prioridade padrao do failover automatico de modelo (ids "provider/modelo").

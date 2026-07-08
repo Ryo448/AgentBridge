@@ -75,6 +75,7 @@ Auth: `Authorization: Bearer <local-key>` or `x-api-key` header. Default local k
 | `nvidia/nemotron-3-ultra-550b-a55b` | 0.50 | 2.20 |
 | `qwen/qwen3.5-397b-a17b` | 0.385 | 2.45 |
 | `minimaxai/minimax-m3` | 0.30 | 1.20 |
+| `z-ai/glm-5.2` | 0.93 | 3 |
 
 ## Testing
 
