@@ -287,7 +287,14 @@ function parseSseEvents(text: string) {
       .map((line) => line.slice(5).trimStart())
       .join('\n'))
     .filter((data) => data && data !== '[DONE]')
-    .map((data) => JSON.parse(data));
+    .map((data) => {
+      try {
+        return JSON.parse(data);
+      } catch {
+        return undefined;
+      }
+    })
+    .filter((event): event is Record<string, unknown> => event !== undefined);
 }
 
 function mergeToolCall(
