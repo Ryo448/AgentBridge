@@ -20,7 +20,7 @@ const previewStatus = {
     ? window.agentBridgeModels.map((item) => item.model)
     : [],
   provider: 'NVIDIA',
-  appVersion: '4.3.1',
+  appVersion: '4.4.0',
   apiKey: 'EuAmoORyo',
   needLocalKey: false,
   codexBaseUrl: 'http://localhost:3000/v1',
@@ -93,6 +93,7 @@ const elements = Object.fromEntries([
   'tokenButton', 'tokenModal', 'closeTokenButton', 'tokenSummary', 'tokenModelList', 'tokenTotalSavings',
   'pricingModal', 'closePricingButton', 'pricingInputInput', 'pricingOutputInput', 'pricingModelLabel',
   'savePricingButton', 'cancelPricingButton',
+  'deactivatedModelGrid', 'modelGridPanel', 'deactivatedGridPanel',
   'messageText'
 ].map((id) => [id, byId(id)]));
 
@@ -418,6 +419,10 @@ function priorityOf(status) {
   return Array.isArray(status.modelPriority) ? status.modelPriority : [];
 }
 
+function deactivatedOf(status) {
+  return Array.isArray(status.deactivatedModels) ? status.deactivatedModels : [];
+}
+
 // Devolve as entradas do catalogo na ORDEM da lista de prioridades (modelos fora da
 // prioridade vao para o fim). E nesta ordem que o grid e desenhado.
 function orderedEntries(status) {
@@ -434,11 +439,17 @@ function orderedEntries(status) {
 }
 
 // Persiste catalogo + prioridade no backend e re-renderiza com o status retornado.
+// Mantem o array de desativados inalterado.
 async function persistModels(catalog, priority) {
+  return persistModelsFull(catalog, priority, deactivatedOf(lastStatus));
+}
+
+// Persiste catalogo + prioridade + desativados no backend de uma vez so.
+async function persistModelsFull(catalog, priority, deactivated) {
   if (busyModels) return;
   busyModels = true;
   try {
-    const status = await bridge.updateModels({ catalog, priority });
+    const status = await bridge.updateModels({ catalog, priority, deactivated });
     renderStatus(status);
   } catch (error) {
     elements.messageText.textContent =
@@ -568,7 +579,7 @@ function buildEditForm(entry, status) {
       ? { label: label || model, model, icon: other.icon }
       : other);
     const priority = priorityOf(status).map((id) => (id === entry.model ? model : id));
-    persistModels(catalog, priority);
+    persistModelsFull(catalog, priority, deactivatedOf(status));
   });
 
   return form;
@@ -689,6 +700,19 @@ function buildModelGrid(status) {
     pricing.addEventListener('click', () => openPricingModal(entry, status));
 
     actions.append(test, edit, pricing);
+    {
+      const deactivate = document.createElement('button');
+      deactivate.type = 'button';
+      deactivate.className = 'model-deactivate';
+      deactivate.textContent = t('models.deactivate');
+      deactivate.addEventListener('click', () => {
+        const catalog = catalogOf(status).filter((other) => other.model !== entry.model);
+        const priority = priorityOf(status).filter((id) => id !== entry.model);
+        const deactivated = [...deactivatedOf(status), catalogOf(status).find((m) => m.model === entry.model) || entry];
+        persistModelsFull(catalog, priority, deactivated);
+      });
+      actions.append(deactivate);
+    }
     if (canRemove) {
       const remove = document.createElement('button');
       remove.type = 'button';
@@ -697,7 +721,7 @@ function buildModelGrid(status) {
       remove.addEventListener('click', () => {
         const catalog = catalogOf(status).filter((other) => other.model !== entry.model);
         const priority = priorityOf(status).filter((id) => id !== entry.model);
-        persistModels(catalog, priority);
+        persistModelsFull(catalog, priority, deactivatedOf(status));
       });
       actions.append(remove);
     }
@@ -715,6 +739,143 @@ function buildModelGrid(status) {
   });
 
   elements.modelGrid.replaceChildren(fragment);
+}
+
+// Constroi o grid de modelos desativados. Cada card mostra nome/id e permite
+// editar, configurar precos, reativar e remover permanentemente.
+function buildDeactivatedGrid(status) {
+  const fragment = document.createDocumentFragment();
+  const deactivated = deactivatedOf(status);
+
+  if (!deactivated.length) {
+    const empty = document.createElement('div');
+    empty.className = 'terminal-empty';
+    empty.textContent = t('models.deactivatedEmpty');
+    fragment.append(empty);
+    elements.deactivatedModelGrid.replaceChildren(fragment);
+    return;
+  }
+
+  deactivated.forEach((entry) => {
+    const card = document.createElement('div');
+    card.className = 'model-card deactivated';
+    card.dataset.model = entry.model;
+
+    const head = document.createElement('div');
+    head.className = 'model-card-head';
+
+    const icon = document.createElement('span');
+    icon.className = 'model-icon';
+    if (modelIcons) modelIcons.renderInto(icon, entry.icon, entry.label);
+
+    const name = document.createElement('div');
+    name.className = 'model-card-name';
+    const strong = document.createElement('strong');
+    strong.textContent = entry.label;
+    const code = document.createElement('span');
+    code.textContent = entry.model;
+    name.append(strong, code);
+    head.append(icon, name);
+
+    const actions = document.createElement('div');
+    actions.className = 'model-card-actions';
+
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'model-edit';
+    edit.textContent = t('electron.edit');
+
+    const pricing = document.createElement('button');
+    pricing.type = 'button';
+    pricing.className = 'model-pricing';
+    pricing.textContent = '$';
+    pricing.title = t('electron.pricing');
+    pricing.addEventListener('click', () => openPricingModalDeactivated(entry, status));
+
+    const reactivate = document.createElement('button');
+    reactivate.type = 'button';
+    reactivate.className = 'model-reactivate';
+    reactivate.textContent = t('models.reactivate');
+    reactivate.addEventListener('click', () => {
+      const remain = deactivated.filter((other) => other.model !== entry.model);
+      const catalog = [...catalogOf(status), entry];
+      const priority = [...priorityOf(status), entry.model];
+      persistModelsFull(catalog, priority, remain);
+    });
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'model-remove';
+    remove.textContent = t('electron.remove');
+    remove.addEventListener('click', () => {
+      const remain = deactivated.filter((other) => other.model !== entry.model);
+      persistModelsFull(catalogOf(status), priorityOf(status), remain);
+    });
+
+    actions.append(edit, pricing, reactivate, remove);
+
+    // Formulario inline de edicao para modelo desativado.
+    const editForm = document.createElement('form');
+    editForm.className = 'model-edit-form hidden';
+    const nameLabel = document.createElement('label');
+    nameLabel.className = 'field-label';
+    nameLabel.textContent = t('models.modelName');
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.value = entry.label;
+    const idLabel = document.createElement('label');
+    idLabel.className = 'field-label';
+    idLabel.textContent = t('models.providerModel');
+    const idInput = document.createElement('input');
+    idInput.type = 'text';
+    idInput.value = entry.model;
+    const error = document.createElement('div');
+    error.className = 'form-error';
+    const actions2 = document.createElement('div');
+    actions2.className = 'add-model-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'button ghost';
+    cancel.textContent = t('electron.cancel');
+    const save = document.createElement('button');
+    save.type = 'submit';
+    save.className = 'button primary';
+    save.textContent = t('electron.save');
+    actions2.append(cancel, save);
+    editForm.append(nameLabel, nameInput, idLabel, idInput, error, actions2);
+    cancel.addEventListener('click', () => editForm.classList.add('hidden'));
+    editForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const label = nameInput.value.trim();
+      const model = idInput.value.trim();
+      if (!model) { error.textContent = t('models.mustInformProvider'); return; }
+      const dup = deactivated.some((other) => other.model !== entry.model && other.model === model)
+        || catalogOf(status).some((other) => other.model === model);
+      if (dup) { error.textContent = t('models.alreadyExists'); return; }
+      const newDeactivated = deactivated.map((other) => other.model === entry.model
+        ? { label: label || model, model, icon: other.icon, inputPrice: other.inputPrice, outputPrice: other.outputPrice }
+        : other);
+      persistModelsFull(catalogOf(status), priorityOf(status), newDeactivated);
+    });
+    edit.addEventListener('click', () => editForm.classList.toggle('hidden'));
+
+    card.append(head, actions, editForm);
+    fragment.append(card);
+  });
+
+  elements.deactivatedModelGrid.replaceChildren(fragment);
+}
+
+// Abre o modal de pricing para um modelo desativado.
+function openPricingModalDeactivated(entry, status) {
+  pricingModelId = entry.model;
+  pricingIsDeactivated = true;
+  elements.pricingModelLabel.textContent = entry.label + ' (' + entry.model + ')';
+  const curInput = entry.inputPrice != null ? entry.inputPrice : 0;
+  const curOutput = entry.outputPrice != null ? entry.outputPrice : 0;
+  elements.pricingInputInput.value = curInput;
+  elements.pricingOutputInput.value = curOutput;
+  elements.pricingModal.classList.remove('hidden');
 }
 
 // Re-renderiza o modal de modelo a partir do status. So reconstroi o grid quando a
@@ -738,11 +899,13 @@ function renderModelModal(status) {
     active: activeModelOf(status),
     selected: status.selectedModel,
     catalog: catalogOf(status),
-    priority: priorityOf(status)
+    priority: priorityOf(status),
+    deactivated: deactivatedOf(status)
   });
   if (signature !== modelGridSignature) {
     modelGridSignature = signature;
     buildModelGrid(status);
+    buildDeactivatedGrid(status);
   }
 }
 
@@ -750,6 +913,26 @@ function openSelect() {
   renderModelModal(lastStatus);
   elements.selectModal.classList.remove('hidden');
 }
+
+// Tab switching dentro do modal de modelos: Ativos vs Desativados.
+document.querySelectorAll('.model-tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.model-tab').forEach((t) => t.classList.remove('active'));
+    document.querySelectorAll('.model-tab-panel').forEach((p) => {
+      p.classList.remove('active');
+      p.classList.add('hidden');
+    });
+    tab.classList.add('active');
+    const target = tab.dataset.modelTab;
+    if (target === 'active') {
+      elements.modelGridPanel.classList.add('active');
+      elements.modelGridPanel.classList.remove('hidden');
+    } else {
+      elements.deactivatedGridPanel.classList.add('active');
+      elements.deactivatedGridPanel.classList.remove('hidden');
+    }
+  });
+});
 
 function openConfig() {
   if (!elements.apiFields.children.length) {
@@ -921,6 +1104,10 @@ if (elements.addModelForm) {
       elements.addModelError.textContent = t('electron.duplicateModel');
       return;
     }
+    if (deactivatedOf(lastStatus).some((entry) => entry.model === model)) {
+      elements.addModelError.textContent = t('models.alreadyExists');
+      return;
+    }
     // Novo modelo entra no catalogo (icone vazio = placeholder com a 1a letra) e no
     // FIM da fila de prioridades; pode ser reordenado depois.
     const catalog = [...catalogOf(lastStatus), { label, model, icon: '' }];
@@ -1029,9 +1216,11 @@ if (elements.closeLocaleButton) {
 
 // --- Modal de pricing ---
 let pricingModelId = null;
+let pricingIsDeactivated = false;
 
 function openPricingModal(entry, status) {
   pricingModelId = entry.model;
+  pricingIsDeactivated = false;
   elements.pricingModelLabel.textContent = entry.label + ' (' + entry.model + ')';
   const curInput = entry.inputPrice != null ? entry.inputPrice : 0;
   const curOutput = entry.outputPrice != null ? entry.outputPrice : 0;
@@ -1057,18 +1246,33 @@ elements.savePricingButton.addEventListener('click', async () => {
   if (!Number.isFinite(inputPrice) || inputPrice < 0 || !Number.isFinite(outputPrice) || outputPrice < 0) return;
 
   const status = lastStatus;
-  const catalog = catalogOf(status).map((entry) => {
-    if (entry.model === pricingModelId) {
-      return { ...entry, inputPrice, outputPrice };
+  if (pricingIsDeactivated) {
+    const deactivated = deactivatedOf(status).map((entry) => {
+      if (entry.model === pricingModelId) {
+        return { ...entry, inputPrice, outputPrice };
+      }
+      return entry;
+    });
+    try {
+      const newStatus = await bridge.updateModels({ catalog: catalogOf(status), priority: priorityOf(status), deactivated });
+      renderStatus(newStatus || status);
+    } catch (e) {
+      // ignore
     }
-    return entry;
-  });
-  const priority = priorityOf(status);
-  try {
-    const newStatus = await bridge.updateModels({ catalog, priority });
-    renderStatus(newStatus || status);
-  } catch (e) {
-    // ignore
+  } else {
+    const catalog = catalogOf(status).map((entry) => {
+      if (entry.model === pricingModelId) {
+        return { ...entry, inputPrice, outputPrice };
+      }
+      return entry;
+    });
+    const priority = priorityOf(status);
+    try {
+      const newStatus = await bridge.updateModels({ catalog, priority, deactivated: deactivatedOf(status) });
+      renderStatus(newStatus || status);
+    } catch (e) {
+      // ignore
+    }
   }
   elements.pricingModal.classList.add('hidden');
   pricingModelId = null;
@@ -1083,7 +1287,7 @@ function openTokenModal() {
     .then((res) => res.json())
     .then((usage) => {
       const models = usage.models || {};
-      const entries = catalogOf(status);
+      const entries = [...catalogOf(status), ...deactivatedOf(status)];
       const MILLION = 1000000;
 
       function fmt(n) {

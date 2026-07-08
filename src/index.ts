@@ -25,6 +25,7 @@ import {
   getSelectedModel,
   isAutoToggleEnabled,
   isModelAvailable,
+  isModelDeactivated,
   markClientRequestCompleted,
   markClientRequestFailed,
   markClientRequestReceived,
@@ -168,6 +169,10 @@ async function invokeChat(
   //     houver, cai para o modelo efetivo em vez de devolver erro.
   const requested = String(body.model ?? '').trim();
   const isPassthrough = requested !== '' && requested !== FIXED_CLIENT_MODEL;
+  // Modelo desativado: bloqueia passthrough, cai para o modelo efetivo.
+  if (isPassthrough && isModelDeactivated(requested)) {
+    throw Object.assign(new Error(t('api.modelDeactivated', { model: requested })), { status: 403 });
+  }
   const target = isPassthrough && isModelAvailable(requested)
     ? requested
     : getEffectiveModel();
@@ -227,7 +232,7 @@ function listKnownModels(): string[] {
     ...DEFAULT_MODEL_CATALOG.map((entry) => entry.model)
   ]
     .map((id) => String(id || '').trim())
-    .filter(Boolean);
+    .filter((id) => id && !isModelDeactivated(id));
   return [...new Set(ids)];
 }
 
@@ -250,6 +255,11 @@ async function invokeChatDirect(
       t('api.modelRequired', { example: DEFAULT_MODEL_CATALOG[0]?.model, fixed: FIXED_CLIENT_MODEL })
     );
     err.status = 400;
+    throw err;
+  }
+  if (isModelDeactivated(requested)) {
+    const err: any = new Error(t('api.modelDeactivated', { model: requested }));
+    err.status = 403;
     throw err;
   }
   const overridden = { ...body, model: requested };
@@ -387,7 +397,8 @@ app.post('/v1/chat/completions', async (context) => {
       localToolInstructions: false
     });
   } catch (error: any) {
-    return context.json({ error: { type: 'proxy_error', message: error.message } }, 503);
+    const status = error?.status === 403 ? 403 : 503;
+    return context.json({ error: { type: 'proxy_error', message: error.message } }, status);
   }
 });
 app.post('/v1/responses', (context) => responsesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', { abortSignal: context.req.raw.signal })));
@@ -437,9 +448,10 @@ app.post('/v1/direct/chat/completions', async (context) => {
       localToolInstructions: false
     });
   } catch (error: any) {
+    const status = error?.status === 400 ? 400 : error?.status === 403 ? 403 : 503;
     return context.json(
       { error: { type: 'proxy_error', message: error.message } },
-      error?.status === 400 ? 400 : 503
+      status
     );
   }
 });

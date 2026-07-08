@@ -14,7 +14,7 @@
           <div>
             <div class="brand-line">
               <h1>AgentBridge</h1>
-              <span id="appVersion" class="version">v4.3.1</span>
+              <span id="appVersion" class="version">v4.4.0</span>
             </div>
             <p data-i18n="electron.brand.description">NVIDIA inference gateway</p>
           </div>
@@ -220,20 +220,32 @@
 
         <p id="selectModeHint" class="select-mode-hint">Ligue o toggle do modelo que o proxy deve usar. So um fica ligado por vez. Use &ldquo;Testar&rdquo; para mandar um prompt complexo (gerar uma calculadora em Python) e medir o tempo de resposta.</p>
 
-        <div id="modelGrid" class="model-grid"></div>
+        <div class="model-tab-bar">
+          <button class="model-tab active" data-model-tab="active" type="button" data-i18n="models.tabActive">Ativos</button>
+          <button class="model-tab" data-model-tab="deactivated" type="button" data-i18n="models.tabDeactivated">Desativados</button>
+        </div>
 
-        <button id="addModelButton" class="button ghost wide" type="button" data-i18n="electron.addModel">+ Adicionar modelo</button>
-        <form id="addModelForm" class="add-model-form hidden">
-          <label class="field-label" for="addModelName" data-i18n="electron.modelName">Nome do modelo</label>
-          <input id="addModelName" type="text" placeholder="Ex.: Llama 4 Maverick" autocomplete="off" />
-          <label class="field-label" for="addModelId" data-i18n="models.providerModel">provider/modelo</label>
-          <input id="addModelId" type="text" placeholder="Ex.: meta/llama-4-maverick" autocomplete="off" />
-          <div id="addModelError" class="form-error"></div>
-          <div class="add-model-actions">
-            <button id="cancelAddModelButton" type="button" class="button ghost" data-i18n="electron.cancel">Cancelar</button>
-            <button type="submit" class="button primary" data-i18n="electron.addToList">Adicionar a lista</button>
-          </div>
-        </form>
+        <div id="modelGridPanel" class="model-tab-panel active">
+          <div id="modelGrid" class="model-grid"></div>
+
+          <button id="addModelButton" class="button ghost wide" type="button" data-i18n="electron.addModel">+ Adicionar modelo</button>
+          <form id="addModelForm" class="add-model-form hidden">
+            <label class="field-label" for="addModelName" data-i18n="electron.modelName">Nome do modelo</label>
+            <input id="addModelName" type="text" placeholder="Ex.: Llama 4 Maverick" autocomplete="off" />
+            <label class="field-label" for="addModelId" data-i18n="models.providerModel">provider/modelo</label>
+            <input id="addModelId" type="text" placeholder="Ex.: meta/llama-4-maverick" autocomplete="off" />
+            <div id="addModelError" class="form-error"></div>
+            <div class="add-model-actions">
+              <button id="cancelAddModelButton" type="button" class="button ghost" data-i18n="electron.cancel">Cancelar</button>
+              <button type="submit" class="button primary" data-i18n="electron.addToList">Adicionar a lista</button>
+            </div>
+          </form>
+        </div>
+
+        <div id="deactivatedGridPanel" class="model-tab-panel hidden">
+          <p class="select-mode-hint" data-i18n="models.deactivatedHint">Modelos desativados nao podem ser chamados nem listados, mas ainda contam na contabilidade de tokens e economia.</p>
+          <div id="deactivatedModelGrid" class="model-grid"></div>
+        </div>
       </div>
     </div>
 

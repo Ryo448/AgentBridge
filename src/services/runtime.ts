@@ -6,7 +6,8 @@ import {
   NVIDIA_RPM_LIMIT,
   RATE_LIMIT_PENALTY_MS,
   RATE_LIMIT_WINDOW_MS,
-  REQUEST_DELAY_MS
+  REQUEST_DELAY_MS,
+  type ModelCatalogEntry
 } from '../config.ts';
 
 // Um castigo de 429 ATIVO para um modelo especifico. A mesma chave pode ter
@@ -141,6 +142,10 @@ let nextSendAt = 0;
 // ao comportamento normal de prioridade.
 let hedgeStickyModel: string | undefined;
 let hedgeStickyRemaining = 0;
+// Modelos desativados pelo usuario: nao podem ser chamados nem listados em
+// /v1/models, mas ainda contam na contabilidade de tokens e economia. Guardamos
+// apenas os ids em um Set para checagem rapida O(1).
+let deactivatedIds = new Set<string>();
 const usageListeners = new Set<(event: ApiKeyUsageEvent) => void>();
 const requestLogListeners = new Set<(event: ApiRequestLogEvent) => void>();
 const penaltyListeners = new Set<(event: ApiKeyPenaltyEvent) => void>();
@@ -167,6 +172,7 @@ export function setRuntimeConfig(config: {
   autoToggle?: boolean;
   modelPriority?: string[];
   localApiKey?: string;
+  deactivatedModels?: ModelCatalogEntry[];
 }) {
   const previousStates = new Map(
     apiKeyStates.map((state) => [state.apiKey, state])
@@ -196,6 +202,13 @@ export function setRuntimeConfig(config: {
   if (typeof config.localApiKey === 'string' && config.localApiKey.trim()) {
     localApiKey = config.localApiKey.trim();
   }
+  if (Array.isArray(config.deactivatedModels)) {
+    deactivatedIds = new Set(
+      config.deactivatedModels
+        .map((item) => String(item?.model || '').trim())
+        .filter(Boolean)
+    );
+  }
   modelCursors = new Map();
 }
 
@@ -209,6 +222,7 @@ export function clearRuntimeConfig() {
   modelPriority = [];
   activeModel = DEFAULT_MODEL;
   localApiKey = INTERNAL_API_KEY;
+  deactivatedIds = new Set();
   clearHedgeSticky();
 }
 
@@ -223,6 +237,23 @@ export function setLocalApiKey(key: unknown) {
   const normalized = String(key || '').trim();
   localApiKey = normalized || INTERNAL_API_KEY;
   return localApiKey;
+}
+
+// Define a lista de modelos desativados. Modelos desativados nao podem ser
+// chamados nem listados, mas ainda contam na contabilidade de tokens e economia.
+export function setDeactivatedModels(models: ModelCatalogEntry[]) {
+  deactivatedIds = new Set(
+    (Array.isArray(models) ? models : [])
+      .map((item) => String(item?.model || '').trim())
+      .filter(Boolean)
+  );
+  return deactivatedIds;
+}
+
+// Diz se um modelo esta desativado (nao pode ser chamado nem listado).
+export function isModelDeactivated(model: string): boolean {
+  const id = String(model || '').trim();
+  return id !== '' && deactivatedIds.has(id);
 }
 
 // Liga/desliga a alternancia automatica de modelo.
@@ -263,6 +294,7 @@ export function pickAvailableModel(exhausted: string[] = [], timestamp = Date.no
   for (const candidate of modelPriority) {
     const id = candidate.trim();
     if (!id || skip.has(modelKey(id))) continue;
+    if (deactivatedIds.has(id)) continue;
     const hasFreeKey = apiKeyStates.some((state) => {
       resetExpiredWindow(state, timestamp);
       return !isResting(state, timestamp, id);
@@ -287,6 +319,7 @@ export function isModelAvailable(model: string, timestamp = Date.now()): boolean
   if (!apiKeyStates.length) return false;
   const id = String(model || '').trim();
   if (!id) return false;
+  if (deactivatedIds.has(id)) return false;
   return apiKeyStates.some((state) => {
     resetExpiredWindow(state, timestamp);
     return !isResting(state, timestamp, id);
@@ -313,6 +346,12 @@ export function getEffectiveModel(timestamp = Date.now()): string {
     }
   } else {
     chosen = getSelectedModel();
+  }
+  // Se o modelo escolhido (manual ou fallback) esta desativado, tenta achar
+  // um modelo ativo da prioridade; senao cai para o DEFAULT_MODEL.
+  if (deactivatedIds.has(chosen.trim())) {
+    const fallback = modelPriority.find((id) => id && !deactivatedIds.has(id));
+    chosen = fallback || DEFAULT_MODEL;
   }
   chosen = chosen.trim() || DEFAULT_MODEL;
   if (chosen !== activeModel) {
@@ -1005,6 +1044,7 @@ export function getRuntimeStatus(timestamp = Date.now()) {
     autoToggle,
     modelPriority: modelPriority.slice(),
     activeModel: getActiveModel(),
+    deactivatedModelIds: [...deactivatedIds],
     requestsThisMinute,
     capacityPerMinute: apiKeyStates.length * NVIDIA_RPM_LIMIT,
     limitPerKey: NVIDIA_RPM_LIMIT,

@@ -10,6 +10,7 @@ import {
   APP_NAME,
   APP_VERSION,
   DEFAULT_AUTO_TOGGLE,
+  DEFAULT_DEACTIVATED_MODELS,
   DEFAULT_MODEL,
   DEFAULT_MODEL_CATALOG,
   DEFAULT_MODEL_PRICES,
@@ -35,11 +36,13 @@ import {
   getRuntimeStatus,
   getSelectedModel,
   isAutoToggleEnabled,
+  isModelDeactivated,
   onApiRequestLog,
   onApiKeyPenalized,
   pruneApiRequestLogs,
   setApiPenaltyUntil,
   setAutoToggle,
+  setDeactivatedModels,
   setLocalApiKey,
   setModelPriority,
   setRuntimeConfig,
@@ -70,6 +73,7 @@ let unlockedConfig: UnlockedConfig = {
   autoToggle: DEFAULT_AUTO_TOGGLE,
   modelPriority: [...DEFAULT_MODEL_PRIORITY],
   modelCatalog: DEFAULT_MODEL_CATALOG.map((item) => ({ ...item })),
+  deactivatedModels: DEFAULT_DEACTIVATED_MODELS.map((item) => ({ ...item })),
   localApiKey: INTERNAL_API_KEY,
   locale: null
 };
@@ -216,6 +220,7 @@ function getStatus() {
     activeModel: getActiveModel(),
     modelPriority: unlockedConfig.modelPriority,
     modelCatalog: unlockedConfig.modelCatalog,
+    deactivatedModels: unlockedConfig.deactivatedModels,
     provider: 'NVIDIA',
     appVersion: APP_VERSION,
     apiKey: getLocalApiKey(),
@@ -357,6 +362,7 @@ async function unlock(password: unknown) {
       autoToggle: DEFAULT_AUTO_TOGGLE,
       modelPriority: [...DEFAULT_MODEL_PRIORITY],
       modelCatalog: DEFAULT_MODEL_CATALOG.map((item) => ({ ...item })),
+      deactivatedModels: DEFAULT_DEACTIVATED_MODELS.map((item) => ({ ...item })),
       localApiKey: INTERNAL_API_KEY,
       locale: null
     };
@@ -402,6 +408,7 @@ async function persistConfig(input: any) {
     autoToggle: unlockedConfig.autoToggle,
     modelPriority: unlockedConfig.modelPriority,
     modelCatalog: unlockedConfig.modelCatalog,
+    deactivatedModels: unlockedConfig.deactivatedModels,
     localApiKey: unlockedConfig.localApiKey,
     locale: unlockedConfig.locale
   };
@@ -476,23 +483,54 @@ function sanitizeCatalog(value: unknown): ModelCatalogEntry[] {
   return catalog.length ? catalog : unlockedConfig.modelCatalog;
 }
 
+// Saneia o catalogo de modelos desativados: mesmo mecanismo do sanitizeCatalog,
+// mas vazio e valido (sem fallback para DEFAULT_MODEL_CATALOG). Nao elimina
+// duplicatas ja tratadas pelo sanitize do catalogo ativo: a interseccao e
+// resolvida no caller (ao desativar/reactivar).
+function sanitizeDeactivatedCatalog(value: unknown): ModelCatalogEntry[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const catalog: ModelCatalogEntry[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') continue;
+    const entry = raw as Partial<ModelCatalogEntry>;
+    const model = String(entry.model || '').trim();
+    if (!model || seen.has(model)) continue;
+    seen.add(model);
+    const defPrices = DEFAULT_MODEL_PRICES[model];
+    catalog.push({
+      model,
+      label: String(entry.label || '').trim() || model,
+      icon: String(entry.icon || '').trim(),
+      inputPrice: typeof entry.inputPrice === 'number' && Number.isFinite(entry.inputPrice) && entry.inputPrice >= 0
+        ? entry.inputPrice
+        : (defPrices ? defPrices.input : undefined),
+      outputPrice: typeof entry.outputPrice === 'number' && Number.isFinite(entry.outputPrice) && entry.outputPrice >= 0
+        ? entry.outputPrice
+        : (defPrices ? defPrices.output : undefined)
+    });
+  }
+  return catalog;
+}
+
 // Saneia a prioridade: mantem apenas ids do catalogo, sem duplicar, e acrescenta no
 // fim os modelos do catalogo que ficaram de fora (modelos novos entram no fim da fila).
-function sanitizePriority(value: unknown, catalog: ModelCatalogEntry[]): string[] {
+function sanitizePriority(value: unknown, catalog: ModelCatalogEntry[], deactivated: ModelCatalogEntry[] = []): string[] {
   const known = new Set(catalog.map((item) => item.model));
+  const deactivatedIds = new Set(deactivated.map((item) => item.model));
   const priority: string[] = [];
   const seen = new Set<string>();
   if (Array.isArray(value)) {
     for (const raw of value) {
       const model = String(raw || '').trim();
-      if (model && known.has(model) && !seen.has(model)) {
+      if (model && known.has(model) && !seen.has(model) && !deactivatedIds.has(model)) {
         seen.add(model);
         priority.push(model);
       }
     }
   }
   for (const item of catalog) {
-    if (!seen.has(item.model)) {
+    if (!seen.has(item.model) && !deactivatedIds.has(item.model)) {
       seen.add(item.model);
       priority.push(item.model);
     }
@@ -505,13 +543,24 @@ function sanitizePriority(value: unknown, catalog: ModelCatalogEntry[]): string[
 async function updateModels(payload: any) {
   if (!sessionPassword) throw new Error(t('error.unlockFirst'));
   const catalog = sanitizeCatalog(payload?.catalog);
-  const priority = sanitizePriority(payload?.priority, catalog);
-  unlockedConfig.modelCatalog = catalog;
+  const deactivated = sanitizeDeactivatedCatalog(payload?.deactivated ?? unlockedConfig.deactivatedModels);
+  // Garante que nao ha interseccao entre catalogo ativo e desativado.
+  const deactivatedIds = new Set(deactivated.map((item) => item.model));
+  const activeCatalog = catalog.filter((item) => !deactivatedIds.has(item.model));
+  const priority = sanitizePriority(payload?.priority, activeCatalog, deactivated);
+  unlockedConfig.modelCatalog = activeCatalog;
+  unlockedConfig.deactivatedModels = deactivated;
   unlockedConfig.modelPriority = priority;
   setModelPriority(priority);
+  setDeactivatedModels(deactivated);
+  // Se o modelo selecionado acabou de ser desativado, troca para um ativo.
+  if (deactivatedIds.has(unlockedConfig.selectedModel)) {
+    unlockedConfig.selectedModel = activeCatalog[0]?.model || DEFAULT_MODEL;
+  }
   if (unlockedConfig.apiKeys.length) {
     saveConfig(configPath(), sessionPassword, unlockedConfig);
   }
+  setRuntimeConfig(unlockedConfig);
   broadcastStatus();
   return getStatus();
 }

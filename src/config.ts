@@ -1,5 +1,5 @@
 export const APP_NAME = 'AgentBridge';
-export const APP_VERSION = '4.3.1';
+export const APP_VERSION = '4.4.0';
 export const INTERNAL_API_KEY = 'EuAmoORyo';
 export const DEFAULT_PORT = 3000;
 // Modelo NVIDIA padrao para onde o proxy redireciona qualquer chamada quando o
@@ -31,6 +31,11 @@ export const DEFAULT_MODEL_PRICES: Record<string, { input: number; output: numbe
   'minimaxai/minimax-m3': { input: 0.30, output: 1.20 },
   'qwen/qwen3.5-397b-a17b': { input: 0.385, output: 2.45 }
 };
+
+// Catalogo de modelos desativados (vazio por padrao). Modelos desativados nao
+// podem ser chamados nem listados em /v1/models, mas ainda contam na contabilidade
+// de tokens e economia.
+export const DEFAULT_DEACTIVATED_MODELS: ModelCatalogEntry[] = [];
 
 // Catalogo padrao de modelos. Pode ser editado, reordenado e ampliado pelo usuario;
 // os valores aqui sao apenas o ponto de partida quando ainda nao ha nada salvo.

@@ -90,6 +90,7 @@ export const messages: Record<Locale, I18nMessages> = {
     'hotkey.clear': 'clear',
     'hotkey.quit': 'quit',
     'hotkey.locale': 'language',
+    'hotkey.deactivated': 'desativados',
 
     /* ───── APIs screen ───── */
     'apis.title': 'NVIDIA APIs',
@@ -146,6 +147,15 @@ export const messages: Record<Locale, I18nMessages> = {
     'models.testFailed': 'Failed: {message}',
     'models.registerFirst': 'Register at least one API first.',
 
+    /* ───── Deactivated models screen ───── */
+    'models.deactivatedTitle': 'Deactivated Models',
+    'models.deactivatedSubtitle': 'Deactivated models cannot be called or listed, but still count in token/savings accounting.',
+    'models.deactivate': 'Deactivate',
+    'models.reactivate': 'Reactivate',
+    'models.deactivatedEmpty': 'No deactivated models.',
+    'models.tabActive': 'Active',
+    'models.tabDeactivated': 'Deactivated',
+    'models.deactivatedHint': 'Deactivated models cannot be called or listed in /v1/models, but still count in token and savings accounting.',
     /* ───── Penalties screen ───── */
     'penalties.title': 'PENALIZED APIs (HTTP 429)',
     'penalties.subtitle': '1h cooldown per (key, model). File: {path}',
@@ -262,6 +272,7 @@ export const messages: Record<Locale, I18nMessages> = {
     'api.catalogMessage': 'Pick a real id to go straight to it, or "{fixed}" to use the model selected in the app.',
     'api.availableMessage': 'Send the real id in POST /v1/direct/chat/completions (or /v1/direct/responses, /v1/direct/messages) to go straight to that model.',
     'api.autoLabel': 'AgentBridge (auto)',
+    'api.modelDeactivated': 'Model "{model}" is deactivated and cannot be called.',
 
     'tokens.title': 'Tokens & Savings',
     'tokens.subtitle': 'Total: {total} tok · Last 30min: {recent} · Saved: {savings}',
@@ -515,6 +526,7 @@ export const messages: Record<Locale, I18nMessages> = {
     'hotkey.clear': 'limpar',
     'hotkey.quit': 'sair',
     'hotkey.locale': 'idioma',
+    'hotkey.deactivated': 'desativados',
 
     /* ───── APIs screen ───── */
     'apis.title': 'APIs NVIDIA',
@@ -571,6 +583,15 @@ export const messages: Record<Locale, I18nMessages> = {
     'models.testFailed': 'Falhou: {message}',
     'models.registerFirst': 'Cadastre ao menos uma API primeiro.',
 
+    /* ───── Deactivated models screen ───── */
+    'models.deactivatedTitle': 'Modelos Desativados',
+    'models.deactivatedSubtitle': 'Modelos desativados nao podem ser chamados nem listados, mas ainda contam na contabilidade de tokens e economia.',
+    'models.deactivate': 'Desativar',
+    'models.reactivate': 'Reativar',
+    'models.deactivatedEmpty': 'Nenhum modelo desativado.',
+    'models.tabActive': 'Ativos',
+    'models.tabDeactivated': 'Desativados',
+    'models.deactivatedHint': 'Modelos desativados nao podem ser chamados nem listados em /v1/models, mas ainda contam na contabilidade de tokens e economia.',
     /* ───── Penalties screen ───── */
     'penalties.title': 'APIs EM CASTIGO (HTTP 429)',
     'penalties.subtitle': 'Cooldown de 1h por (chave, modelo). Arquivo: {path}',
@@ -672,6 +693,7 @@ export const messages: Record<Locale, I18nMessages> = {
     'api.catalogMessage': 'Escolha um id real para ir direto a ele, ou "{fixed}" para usar o modelo selecionado no app.',
     'api.availableMessage': 'Envie o id real em POST /v1/direct/chat/completions (ou /v1/direct/responses, /v1/direct/messages) para ir direto a esse modelo.',
     'api.autoLabel': 'AgentBridge (auto)',
+    'api.modelDeactivated': 'O modelo "{model}" esta desativado e nao pode ser chamado.',
 
     'tokens.title': 'Tokens & Economia',
     'tokens.subtitle': 'Total: {total} tok · Ultimos 30min: {recent} · Economia: {savings}',
@@ -925,6 +947,7 @@ export const messages: Record<Locale, I18nMessages> = {
     'hotkey.clear': 'leeren',
     'hotkey.quit': 'beenden',
     'hotkey.locale': 'sprache',
+    'hotkey.deactivated': 'deaktiviert',
 
     /* ───── APIs screen ───── */
     'apis.title': 'NVIDIA APIs',
@@ -981,6 +1004,15 @@ export const messages: Record<Locale, I18nMessages> = {
     'models.testFailed': 'Fehlgeschlagen: {message}',
     'models.registerFirst': 'Registrieren Sie zuerst mindestens eine API.',
 
+    /* ───── Deactivated models screen ───── */
+    'models.deactivatedTitle': 'Deaktivierte Modelle',
+    'models.deactivatedSubtitle': 'Deaktivierte Modelle können nicht aufgerufen oder aufgelistet werden, werden aber weiterhin in der Token-/Einsparungsverrechnung gezählt.',
+    'models.deactivate': 'Deaktivieren',
+    'models.reactivate': 'Reaktivieren',
+    'models.deactivatedEmpty': 'Keine deaktivierten Modelle.',
+    'models.tabActive': 'Aktiv',
+    'models.tabDeactivated': 'Deaktiviert',
+    'models.deactivatedHint': 'Deaktivierte Modelle können nicht aufgerufen oder in /v1/models aufgelistet werden, werden aber weiterhin in der Token- und Einsparungsverrechnung gezählt.',
     /* ───── Penalties screen ───── */
     'penalties.title': 'GESPERRTE APIs (HTTP 429)',
     'penalties.subtitle': '1h Abklingzeit pro (Schlüssel, Modell). Datei: {path}',
@@ -1082,6 +1114,7 @@ export const messages: Record<Locale, I18nMessages> = {
     'api.catalogMessage': 'Wählen Sie eine echte ID, um direkt dorthin zu gehen, oder "{fixed}", um das in der App ausgewählte Modell zu verwenden.',
     'api.availableMessage': 'Senden Sie die echte ID in POST /v1/direct/chat/completions (oder /v1/direct/responses, /v1/direct/messages), um direkt zu diesem Modell zu gehen.',
     'api.autoLabel': 'AgentBridge (auto)',
+    'api.modelDeactivated': 'Modell „{model}" ist deaktiviert und kann nicht aufgerufen werden.',
 
     'tokens.title': 'Tokens & Ersparnis',
     'tokens.subtitle': 'Gesamt: {total} Tok · Letzte 30min: {recent} · Ersparnis: {savings}',
@@ -1335,6 +1368,7 @@ export const messages: Record<Locale, I18nMessages> = {
     'hotkey.clear': 'очист.',
     'hotkey.quit': 'выход',
     'hotkey.locale': 'язык',
+    'hotkey.deactivated': 'отключён',
 
     /* ───── APIs screen ───── */
     'apis.title': 'API NVIDIA',
@@ -1391,6 +1425,15 @@ export const messages: Record<Locale, I18nMessages> = {
     'models.testFailed': 'Ошибка: {message}',
     'models.registerFirst': 'Сначала зарегистрируйте хотя бы один API.',
 
+    /* ───── Deactivated models screen ───── */
+    'models.deactivatedTitle': 'Отключённые модели',
+    'models.deactivatedSubtitle': 'Отключённые модели не могут быть вызваны или перечислены, но по-прежнему учитываются в подсчёте токенов и экономии.',
+    'models.deactivate': 'Отключить',
+    'models.reactivate': 'Включить',
+    'models.deactivatedEmpty': 'Нет отключённых моделей.',
+    'models.tabActive': 'Активные',
+    'models.tabDeactivated': 'Отключённые',
+    'models.deactivatedHint': 'Отключённые модели не могут быть вызваны или перечислены в /v1/models, но по-прежнему учитываются в подсчёте токенов и экономии.',
     /* ───── Penalties screen ───── */
     'penalties.title': 'ЗАБЛОКИРОВАННЫЕ API (HTTP 429)',
     'penalties.subtitle': '1ч блокировки на (ключ, модель). Файл: {path}',
@@ -1492,6 +1535,7 @@ export const messages: Record<Locale, I18nMessages> = {
     'api.catalogMessage': 'Выберите реальный id, чтобы идти прямо к нему, или "{fixed}", чтобы использовать модель, выбранную в приложении.',
     'api.availableMessage': 'Отправьте реальный id в POST /v1/direct/chat/completions (или /v1/direct/responses, /v1/direct/messages), чтобы идти прямо к этой модели.',
     'api.autoLabel': 'AgentBridge (авто)',
+    'api.modelDeactivated': 'Модель «{model}» отключена и не может быть вызвана.',
 
     'tokens.title': 'Токены & Экономия',
     'tokens.subtitle': 'Всего: {total} ток · Последние 30мин: {recent} · Экономия: {savings}',
@@ -1745,6 +1789,7 @@ export const messages: Record<Locale, I18nMessages> = {
     'hotkey.clear': '清除',
     'hotkey.quit': '退出',
     'hotkey.locale': '语言',
+    'hotkey.deactivated': '已停用',
 
     /* ───── APIs screen ───── */
     'apis.title': 'NVIDIA API',
@@ -1801,6 +1846,15 @@ export const messages: Record<Locale, I18nMessages> = {
     'models.testFailed': '失败：{message}',
     'models.registerFirst': '请先注册至少一个 API。',
 
+    /* ───── Deactivated models screen ───── */
+    'models.deactivatedTitle': '已停用的模型',
+    'models.deactivatedSubtitle': '已停用的模型不能被调用或列出，但仍计入令牌和节省的统计中。',
+    'models.deactivate': '停用',
+    'models.reactivate': '启用',
+    'models.deactivatedEmpty': '没有已停用的模型。',
+    'models.tabActive': '活跃',
+    'models.tabDeactivated': '已停用',
+    'models.deactivatedHint': '已停用的模型不能被调用或在 /v1/models 中列出，但仍计入令牌和节省的统计中。',
     /* ───── Penalties screen ───── */
     'penalties.title': '被惩罚的 API (HTTP 429)',
     'penalties.subtitle': '每个（密钥，模型）冷却 1 小时。文件：{path}',
@@ -1902,6 +1956,7 @@ export const messages: Record<Locale, I18nMessages> = {
     'api.catalogMessage': '选择一个真实 id 直接路由到它，或 "{fixed}" 使用应用中选定的模型。',
     'api.availableMessage': '在 POST /v1/direct/chat/completions（或 /v1/direct/responses、/v1/direct/messages）中发送真实 id 以直接路由到该模型。',
     'api.autoLabel': 'AgentBridge (自动)',
+    'api.modelDeactivated': '模型 "{model}" 已停用，无法调用。',
 
     'tokens.title': '令牌与节省',
     'tokens.subtitle': '总计: {total} 令牌 · 最近30分钟: {recent} · 节省: {savings}',

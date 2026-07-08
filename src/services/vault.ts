@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   DEFAULT_AUTO_TOGGLE,
+  DEFAULT_DEACTIVATED_MODELS,
   DEFAULT_LOCALE,
   DEFAULT_MODEL,
   DEFAULT_MODEL_CATALOG,
@@ -38,6 +39,9 @@ export type EncryptedConfig = {
   modelPriority?: string[];
   // Catalogo de modelos selecionaveis, incluindo os adicionados/editados pelo usuario.
   modelCatalog?: ModelCatalogEntry[];
+  // Catalogo de modelos desativados. Nao podem ser chamados nem listados, mas
+  // ainda contam na contabilidade de tokens e economia.
+  deactivatedModels?: ModelCatalogEntry[];
   // Chave local que os clientes precisam enviar para usar o proxy. E um segredo,
   // entao fica criptografada igual as chaves NVIDIA. Ausente em configs antigas.
   localApiKey?: CipherText;
@@ -60,6 +64,9 @@ export type UnlockedConfig = {
   modelPriority: string[];
   // Catalogo de modelos selecionaveis exibido no app.
   modelCatalog: ModelCatalogEntry[];
+  // Catalogo de modelos desativados: nao sao chamaveis nem listados, mas contam
+  // na contabilidade de tokens e economia.
+  deactivatedModels: ModelCatalogEntry[];
   // Chave local exigida dos clientes (Codex/Claude/etc.).
   localApiKey: string;
   // Idioma da interface (ex.: 'pt-BR', 'en'). null/undefined -> deteccao automatica.
@@ -94,23 +101,53 @@ function normalizeCatalog(value: unknown): ModelCatalogEntry[] {
   return catalog.length ? catalog : DEFAULT_MODEL_CATALOG.map((item) => ({ ...item }));
 }
 
+// Saneia o catalogo de modelos desativados: mesma logica do normalizeCatalog, mas
+// vazio e valido (sem fallback para DEFAULT_MODEL_CATALOG). Descarta entradas sem
+// `model`, normaliza strings, remove ids duplicados e preenche precos padrao.
+function normalizeDeactivatedCatalog(value: unknown): ModelCatalogEntry[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const catalog: ModelCatalogEntry[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') continue;
+    const entry = raw as Partial<ModelCatalogEntry>;
+    const model = String(entry.model || '').trim();
+    if (!model || seen.has(model)) continue;
+    seen.add(model);
+    const defPrices = DEFAULT_MODEL_PRICES[model];
+    catalog.push({
+      model,
+      label: String(entry.label || '').trim() || model,
+      icon: String(entry.icon || '').trim(),
+      inputPrice: typeof entry.inputPrice === 'number' && Number.isFinite(entry.inputPrice) && entry.inputPrice >= 0
+        ? entry.inputPrice
+        : (defPrices ? defPrices.input : undefined),
+      outputPrice: typeof entry.outputPrice === 'number' && Number.isFinite(entry.outputPrice) && entry.outputPrice >= 0
+        ? entry.outputPrice
+        : (defPrices ? defPrices.output : undefined)
+    });
+  }
+  return catalog;
+}
+
 // Saneia a lista de prioridades: mantem apenas ids que existem no catalogo, sem
 // duplicar, e acrescenta no fim qualquer modelo do catalogo que tenha ficado de fora.
-function normalizePriority(value: unknown, catalog: ModelCatalogEntry[]): string[] {
+function normalizePriority(value: unknown, catalog: ModelCatalogEntry[], deactivated: ModelCatalogEntry[] = []): string[] {
   const known = new Set(catalog.map((item) => item.model));
+  const deactivatedIds = new Set(deactivated.map((item) => item.model));
   const priority: string[] = [];
   const seen = new Set<string>();
   if (Array.isArray(value)) {
     for (const raw of value) {
       const model = String(raw || '').trim();
-      if (model && known.has(model) && !seen.has(model)) {
+      if (model && known.has(model) && !seen.has(model) && !deactivatedIds.has(model)) {
         seen.add(model);
         priority.push(model);
       }
     }
   }
   for (const item of catalog) {
-    if (!seen.has(item.model)) {
+    if (!seen.has(item.model) && !deactivatedIds.has(item.model)) {
       seen.add(item.model);
       priority.push(item.model);
     }
@@ -160,6 +197,11 @@ export function unlockConfig(filePath: string, password: string): UnlockedConfig
   }
 
   const modelCatalog = normalizeCatalog(stored.modelCatalog);
+  const deactivatedModels = normalizeDeactivatedCatalog(stored.deactivatedModels);
+  // Garante que nenhum modelo desativado esteja no catalogo ativo (migracao
+  // de configs antigas onde a separacao ainda nao existia).
+  const deactivatedIds = new Set(deactivatedModels.map((item) => item.model));
+  const activeCatalog = modelCatalog.filter((item) => !deactivatedIds.has(item.model));
   // Configs antigas nao tem localApiKey: caem para a chave padrao do config.
   const localApiKey = stored.localApiKey
     ? (decryptValue(stored.localApiKey, key).trim() || INTERNAL_API_KEY)
@@ -174,8 +216,9 @@ export function unlockConfig(filePath: string, password: string): UnlockedConfig
     apiKeys: stored.apiKeys.map((item) => decryptValue(item, key)),
     selectedModel: stored.model && stored.model.trim() ? stored.model.trim() : DEFAULT_MODEL,
     autoToggle: typeof stored.autoToggle === 'boolean' ? stored.autoToggle : DEFAULT_AUTO_TOGGLE,
-    modelCatalog,
-    modelPriority: normalizePriority(stored.modelPriority, modelCatalog),
+    modelCatalog: activeCatalog,
+    deactivatedModels,
+    modelPriority: normalizePriority(stored.modelPriority, activeCatalog, deactivatedModels),
     localApiKey,
     locale
   };
@@ -210,6 +253,7 @@ export function saveConfig(
   const salt = randomBytes(16);
   const key = deriveKey(password, salt);
   const modelCatalog = normalizeCatalog(config.modelCatalog);
+  const deactivatedModels = normalizeDeactivatedCatalog(config.deactivatedModels);
   const stored: EncryptedConfig = {
     version: 2,
     port: config.port,
@@ -220,7 +264,8 @@ export function saveConfig(
       : DEFAULT_MODEL,
     autoToggle: Boolean(config.autoToggle),
     modelCatalog,
-    modelPriority: normalizePriority(config.modelPriority, modelCatalog),
+    deactivatedModels,
+    modelPriority: normalizePriority(config.modelPriority, modelCatalog, deactivatedModels),
     localApiKey: encryptValue(
       (config.localApiKey && config.localApiKey.trim()) || INTERNAL_API_KEY,
       key

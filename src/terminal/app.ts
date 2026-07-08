@@ -8,6 +8,7 @@ import {
   APP_NAME,
   APP_VERSION,
   DEFAULT_AUTO_TOGGLE,
+  DEFAULT_DEACTIVATED_MODELS,
   DEFAULT_MODEL,
   DEFAULT_MODEL_CATALOG,
   DEFAULT_MODEL_PRIORITY,
@@ -102,6 +103,7 @@ function freshConfig(): UnlockedConfig {
     autoToggle: DEFAULT_AUTO_TOGGLE,
     modelPriority: [...DEFAULT_MODEL_PRIORITY],
     modelCatalog: DEFAULT_MODEL_CATALOG.map((item) => ({ ...item })),
+    deactivatedModels: DEFAULT_DEACTIVATED_MODELS.map((item) => ({ ...item })),
     localApiKey: INTERNAL_API_KEY,
     locale: null
   };
@@ -160,6 +162,32 @@ function sanitizePriority(value: string[], catalog: ModelCatalogEntry[]): string
     }
   }
   return priority;
+}
+
+// Saneia o catalogo de modelos desativados: similar ao sanitizeCatalog, mas vazio
+// e valido. Preenche precos padrao quando ausentes.
+function sanitizeDeactivatedCatalog(value: ModelCatalogEntry[]): ModelCatalogEntry[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const catalog: ModelCatalogEntry[] = [];
+  for (const raw of value) {
+    const model = String(raw.model || '').trim();
+    if (!model || seen.has(model)) continue;
+    seen.add(model);
+    const defPrices = DEFAULT_MODEL_PRICES[model];
+    catalog.push({
+      model,
+      label: String(raw.label || '').trim() || model,
+      icon: String(raw.icon || '').trim(),
+      inputPrice: typeof raw.inputPrice === 'number' && Number.isFinite(raw.inputPrice) && raw.inputPrice >= 0
+        ? raw.inputPrice
+        : (defPrices ? defPrices.input : undefined),
+      outputPrice: typeof raw.outputPrice === 'number' && Number.isFinite(raw.outputPrice) && raw.outputPrice >= 0
+        ? raw.outputPrice
+        : (defPrices ? defPrices.output : undefined)
+    });
+  }
+  return catalog;
 }
 
 // Entradas do catalogo na ordem da lista de prioridades.
@@ -297,8 +325,9 @@ function dashboardLines(): string[] {
   const tokenUsage = readTokenUsage(tokenUsagePath());
   const totalTokens = tokenUsage.totalInputTokens + tokenUsage.totalOutputTokens;
   let totalSpent = 0;
-  // Calcula o custo total baseado nos precos do catalogo
-  for (const entry of unlockedConfig.modelCatalog) {
+  // Calcula o custo total baseado nos precos do catalogo (inclui desativados,
+  // que ainda contam na contabilidade de tokens e economia).
+  for (const entry of [...unlockedConfig.modelCatalog, ...unlockedConfig.deactivatedModels]) {
     const data = tokenUsage.models[entry.model];
     if (!data) continue;
     const defPrices = DEFAULT_MODEL_PRICES[entry.model];
@@ -383,6 +412,7 @@ function hotkeyBar(penaltyCount: number): string {
     proxyServer ? c.accent('S') + c.faint(' ' + t('hotkey.stop')) : key('S', t('hotkey.start')),
     key('A', t('hotkey.apis')),
     key('M', t('hotkey.models')),
+    key('V', t('hotkey.deactivated')),
     key('B', t('hotkey.tokens')),
     castigo,
     key('P', t('hotkey.port')),
@@ -414,7 +444,7 @@ async function dashboardLoop(): Promise<void> {
         const key = (keyEvent.str || '').toLowerCase();
         const map: Record<string, string> = {
           s: 'toggle', a: 'apis', m: 'models', c: 'penalties', b: 'tokens',
-          p: 'port', d: 'delay', k: 'localkey', i: 'integration', t: 'locale', l: 'clear', q: 'quit'
+          p: 'port', d: 'delay', k: 'localkey', i: 'integration', t: 'locale', l: 'clear', v: 'deactivated', q: 'quit'
         };
         const resolved = map[key];
         if (!resolved) return;
@@ -446,6 +476,7 @@ async function handleAction(action: string): Promise<void> {
         break;
       case 'apis': await apisScreen(); break;
       case 'models': await modelsScreen(); break;
+      case 'deactivated': await deactivatedModelsScreen(); break;
       case 'tokens': await tokensScreen(); break;
       case 'penalties': await penaltiesScreen(); break;
       case 'port': await portScreen(); break;
@@ -645,6 +676,7 @@ async function modelActionScreen(model: string): Promise<void> {
       { label: t('models.moveDown'), value: 'down', disabled: idx < 0 || idx >= unlockedConfig.modelPriority.length - 1 },
       { label: t('models.edit'), value: 'edit' },
       { label: t('pricing.edit'), value: 'pricing' },
+      { label: c.amber(t('models.deactivate')), value: 'deactivate' },
       { label: c.red(t('models.removeCatalog')), value: 'remove', disabled: unlockedConfig.modelCatalog.length <= 1 },
       { label: c.muted(t('models.back')), value: 'back' }
     ]
@@ -676,6 +708,19 @@ async function modelActionScreen(model: string): Promise<void> {
     case 'pricing':
       await pricingScreen(model);
       break;
+    case 'deactivate': {
+      const entry = unlockedConfig.modelCatalog.find((item) => item.model === model);
+      if (!entry) break;
+      unlockedConfig.modelCatalog = unlockedConfig.modelCatalog.filter((item) => item.model !== model);
+      unlockedConfig.modelPriority = unlockedConfig.modelPriority.filter((id) => id !== model);
+      unlockedConfig.deactivatedModels = sanitizeDeactivatedCatalog([...unlockedConfig.deactivatedModels, entry]);
+      if (unlockedConfig.selectedModel === model) {
+        unlockedConfig.selectedModel = unlockedConfig.modelCatalog[0]?.model || DEFAULT_MODEL;
+      }
+      refreshRuntime();
+      persistToDisk();
+      break;
+    }
     case 'remove': {
       unlockedConfig.modelCatalog = unlockedConfig.modelCatalog.filter((item) => item.model !== model);
       unlockedConfig.modelPriority = sanitizePriority(
@@ -801,6 +846,157 @@ async function testModelScreen(model: string): Promise<void> {
     clearInterval(timer);
   }
   await pause({ lines: sectionHeader(t('models.test'), model).concat(resultLines) });
+}
+
+// ----------------------------------------------------------------------------
+// Tela: Modelos desativados (hotkey V).
+// ----------------------------------------------------------------------------
+async function deactivatedModelsScreen(): Promise<void> {
+  while (true) {
+    const header = sectionHeader(
+      t('models.deactivatedTitle'),
+      t('models.deactivatedSubtitle')
+    );
+
+    const items: Array<{ label: string; value: string; hint?: string }> = [];
+    if (!unlockedConfig.deactivatedModels.length) {
+      await pause({
+        lines: header.concat(
+          '',
+          '  ' + c.faint(t('models.deactivatedEmpty')),
+          ''
+        )
+      });
+      return;
+    }
+    unlockedConfig.deactivatedModels.forEach((entry) => {
+      items.push({
+        label: c.faint('● ') + c.text(entry.label),
+        value: `deactivated:${entry.model}`,
+        hint: c.faint(entry.model)
+      });
+    });
+    items.push({ label: c.muted(t('models.back')), value: 'back' });
+
+    const choice = await selectMenu({ header, items });
+    if (!choice || choice === 'back') return;
+
+    if (choice.startsWith('deactivated:')) {
+      await deactivatedModelActionScreen(choice.slice(13));
+    }
+  }
+}
+
+async function deactivatedModelActionScreen(model: string): Promise<void> {
+  const entry = unlockedConfig.deactivatedModels.find((item) => item.model === model);
+  if (!entry) return;
+
+  const choice = await selectMenu({
+    header: sectionHeader(entry.label, model),
+    items: [
+      { label: t('models.edit'), value: 'edit' },
+      { label: t('pricing.edit'), value: 'pricing' },
+      { label: c.green(t('models.reactivate')), value: 'reactivate' },
+      { label: c.red(t('models.removeCatalog')), value: 'remove' },
+      { label: c.muted(t('models.back')), value: 'back' }
+    ]
+  });
+
+  switch (choice) {
+    case 'edit':
+      await editDeactivatedModelScreen(model);
+      break;
+    case 'pricing':
+      await pricingDeactivatedScreen(model);
+      break;
+    case 'reactivate': {
+      unlockedConfig.deactivatedModels = unlockedConfig.deactivatedModels.filter((item) => item.model !== model);
+      unlockedConfig.modelCatalog = sanitizeCatalog([...unlockedConfig.modelCatalog, entry]);
+      unlockedConfig.modelPriority = sanitizePriority([...unlockedConfig.modelPriority, model], unlockedConfig.modelCatalog);
+      refreshRuntime();
+      persistToDisk();
+      break;
+    }
+    case 'remove': {
+      unlockedConfig.deactivatedModels = unlockedConfig.deactivatedModels.filter((item) => item.model !== model);
+      refreshRuntime();
+      persistToDisk();
+      break;
+    }
+  }
+}
+
+async function editDeactivatedModelScreen(model: string): Promise<void> {
+  const entry = unlockedConfig.deactivatedModels.find((item) => item.model === model);
+  if (!entry) return;
+  const label = await promptText({
+    header: sectionHeader(t('models.editModelTitle'), model),
+    label: t('models.modelName'),
+    initial: entry.label
+  });
+  if (label === null) return;
+  const newId = await promptText({
+    header: sectionHeader(t('models.editModelTitle'), label.trim()),
+    label: t('models.providerModel'),
+    initial: entry.model,
+    validate: (v) => {
+      const id = v.trim();
+      if (!id) return t('models.mustInformProvider');
+      if (id !== model && unlockedConfig.modelCatalog.some((item) => item.model === id)) return t('models.alreadyExists');
+      if (id !== model && unlockedConfig.deactivatedModels.some((item) => item.model === id)) return t('models.alreadyExists');
+      return null;
+    }
+  });
+  if (newId === null) return;
+  const id = newId.trim();
+  unlockedConfig.deactivatedModels = sanitizeDeactivatedCatalog(
+    unlockedConfig.deactivatedModels.map((item) =>
+      item.model === model ? { label: label.trim() || id, model: id, icon: item.icon, inputPrice: item.inputPrice, outputPrice: item.outputPrice } : item
+    )
+  );
+  refreshRuntime();
+  persistToDisk();
+}
+
+async function pricingDeactivatedScreen(model: string): Promise<void> {
+  const entry = unlockedConfig.deactivatedModels.find((m) => m.model === model);
+  if (!entry) return;
+
+  const prices = DEFAULT_MODEL_PRICES[entry.model] || { input: 0, output: 0 };
+  const curInput = typeof entry.inputPrice === 'number' ? entry.inputPrice : prices.input;
+  const curOutput = typeof entry.outputPrice === 'number' ? entry.outputPrice : prices.output;
+
+  const inputValue = await promptText({
+    header: sectionHeader(t('pricing.title', { model: entry.label }), ''),
+    label: t('pricing.inputPrice'),
+    initial: String(curInput),
+    validate: (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? null : t('pricing.invalid');
+    }
+  });
+  if (inputValue === null) return;
+
+  const outputValue = await promptText({
+    header: sectionHeader(t('pricing.title', { model: entry.label }), ''),
+    label: t('pricing.outputPrice'),
+    initial: String(curOutput),
+    validate: (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? null : t('pricing.invalid');
+    }
+  });
+  if (outputValue === null) return;
+
+  entry.inputPrice = Number(inputValue);
+  entry.outputPrice = Number(outputValue);
+  unlockedConfig.deactivatedModels = sanitizeDeactivatedCatalog(unlockedConfig.deactivatedModels);
+  persistToDisk();
+  await pause({
+    lines: sectionHeader(t('pricing.title', { model: entry.label }), '').concat(
+      '  ' + c.green(t('pricing.saved'))
+    )
+  });
 }
 
 // ----------------------------------------------------------------------------
@@ -999,7 +1195,7 @@ function calcSavings(inputTokens: number, outputTokens: number, inputPrice: numb
 async function tokensScreen(): Promise<void> {
   flushTokenUsage(tokenUsagePath());
   const usage = readTokenUsage(tokenUsagePath());
-  const entries = unlockedConfig.modelCatalog;
+  const entries = [...unlockedConfig.modelCatalog, ...unlockedConfig.deactivatedModels];
 
   if (!usage.models || !Object.keys(usage.models).length) {
     await pause({
