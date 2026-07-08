@@ -44,6 +44,7 @@ type ToolCallDraft = {
   };
 };
 
+const EMPTY_RESPONSE_MAX_RETRIES = 3;
 const DEFAULT_STREAM_KEEP_ALIVE_MS = 5_000;
 const SSE_KEEP_ALIVE_CHUNK = new TextEncoder().encode(': keep-alive\n\n');
 const SSE_DONE_CHUNK = new TextEncoder().encode('data: [DONE]\n\n');
@@ -440,7 +441,8 @@ async function makeSuccessResponse(
   clientWantsStream: boolean,
   onResponseText?: (text: string, model?: string) => void,
   keepAliveMs?: number,
-  abortSignal?: AbortSignal
+  abortSignal?: AbortSignal,
+  emptyRetryState?: { count: number }
 ): Promise<Response | undefined> {
   const text = await readRemainingText(attempt.firstChunk, attempt.reader);
   const completion = aggregateChatCompletion(parseSseEvents(text));
@@ -467,7 +469,18 @@ async function makeSuccessResponse(
       model: attempt.model,
       timestamp: Date.now()
     });
-    return undefined;
+    if (emptyRetryState) {
+      emptyRetryState.count++;
+      if (emptyRetryState.count < EMPTY_RESPONSE_MAX_RETRIES) {
+        return undefined;
+      }
+    }
+    if (clientWantsStream) {
+      const headers = cloneHeaders(attempt.response);
+      headers.set('content-type', 'text/event-stream');
+      return new Response(ensureSseDone(text), { status: 200, headers });
+    }
+    return Response.json(completion, { status: 200, headers: { 'cache-control': 'no-store' } });
   }
 
   onResponseText?.(String(completion.choices?.[0]?.message?.content || ''), attempt.model);
@@ -551,6 +564,7 @@ export async function forwardToNvidia(
   let activeModel = typeof body.model === 'string' ? body.model : undefined;
   const exhaustedModels: string[] = [];
   let apiNumber: number | undefined;
+  let emptyRetries = 0;
 
   markApiDelayWaiting({ delayMs, timestamp: now() });
   await reserveSendSlot({ delayMs, now, sleep: rateLimitOptions.sleep });
@@ -593,11 +607,13 @@ export async function forwardToNvidia(
         markApiRequestCancelled({ apiNumber, requestStartedAt, message: 'Cliente cancelou a request.', attempt, maxAttempts, timestamp: now() });
         return new Response(null, { status: 499 });
       }
+      const emptyRetryState = { count: emptyRetries };
       const result = await hedgeForward(
         body, activeModel!, fetchImpl, timeoutMs, rateLimitOptions,
         attempt, maxAttempts, requestStartedAt, options.resolveModel,
-        upstreamBody, acquired, clientWantsStream, now, options.abortSignal, onResponseText
+        upstreamBody, acquired, clientWantsStream, now, options.abortSignal, onResponseText, emptyRetryState
       );
+      emptyRetries = emptyRetryState.count;
       if (result) return result;
       // undefined: erro 429 ou HTTP error que o loop externo pode tentar de novo
       continue;
@@ -663,23 +679,20 @@ export async function forwardToNvidia(
       const completion = aggregateChatCompletion(parseSseEvents(text));
       const usageInfo = (completion as { usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } }).usage;
       if (!completionHasOutput(completion)) {
-        const message = emptyResponseMessage(activeModel);
-        markApiUpstreamError({ apiNumber, status: 204, message, requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
+        markApiUpstreamError({ apiNumber, status: 204, message: emptyResponseMessage(activeModel), requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
         markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, totalTokens: usageInfo?.total_tokens, promptTokens: usageInfo?.prompt_tokens, completionTokens: usageInfo?.completion_tokens, model: activeModel, timestamp: now() });
 
-        if (options.resolveModel) {
-          const previousModel = activeModel;
-          if (activeModel) exhaustedModels.push(activeModel);
-          const nextModel = options.resolveModel(exhaustedModels.slice());
-          if (nextModel && !exhaustedModels.includes(nextModel)) {
-            markApiModelSwitch({ from: previousModel, to: nextModel, apiNumber, reason: 'resposta vazia', timestamp: now() });
-            activeModel = nextModel;
-            body = { ...body, model: nextModel };
-            attempt = 0;
-          }
+        emptyRetries++;
+        if (emptyRetries < EMPTY_RESPONSE_MAX_RETRIES) {
+          continue;
         }
 
-        continue;
+        if (clientWantsStream) {
+          const headers = cloneHeaders(response);
+          headers.set('content-type', 'text/event-stream');
+          return new Response(ensureSseDone(text), { status: 200, headers });
+        }
+        return Response.json(completion, { status: 200, headers: { 'cache-control': 'no-store' } });
       }
       onResponseText?.(String(completion.choices?.[0]?.message?.content || ''), activeModel);
       markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, totalTokens: usageInfo?.total_tokens, promptTokens: usageInfo?.prompt_tokens, completionTokens: usageInfo?.completion_tokens, model: activeModel, timestamp: now() });
@@ -728,7 +741,8 @@ async function hedgeForward(
   clientWantsStream: boolean,
   now: () => number,
   clientAbortSignal?: AbortSignal,
-  onResponseText?: (text: string) => void
+  onResponseText?: (text: string) => void,
+  emptyRetryState?: { count: number }
 ): Promise<Response | undefined> {
   const primaryApiNumber = acquired.apiNumber;
   const primaryAbort = new AbortController();
@@ -828,7 +842,7 @@ async function hedgeForward(
 
     const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk, abortController: primaryAbort };
     cleanup();
-    return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal);
+    return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
   }
 
   // ---- Caso B: Hedge timeout! Primario nao respondeu HTTP em 60s ----
@@ -840,7 +854,7 @@ async function hedgeForward(
     cleanup();
     const httpResult = await primaryHttp;
     if (!httpResult) { cleanup(); return undefined; }
-    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText, clientAbortSignal);
+    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText, clientAbortSignal, emptyRetryState);
   }
   console.log(`[HEDGE] Backup modelo: ${backupModel}`);
 
@@ -865,7 +879,7 @@ async function hedgeForward(
     cleanup();
     const httpResult = await primaryHttp;
     if (!httpResult) { cleanup(); return undefined; }
-    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText, clientAbortSignal);
+    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText, clientAbortSignal, emptyRetryState);
   }
 
   // ---- Backup respondeu (HTTP 200 + primeiro chunk). Grace period. ----
@@ -903,7 +917,7 @@ async function hedgeForward(
         await backupAttempt.reader.cancel().catch(() => {});
         const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk: primaryChunk, abortController: primaryAbort };
         cleanup();
-        return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal);
+        return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
       }
 
       // Primario respondeu HTTP 200 mas chunk vazio — continua com backup
@@ -918,7 +932,7 @@ async function hedgeForward(
   try { await primaryHttp; } catch {}
   cleanup();
   markHedgedModelSwitch({ from: activeModel, to: backupAttempt.model, apiNumber: primaryApiNumber, timestamp: Date.now() });
-  return makeSuccessResponse(backupAttempt, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal);
+  return makeSuccessResponse(backupAttempt, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
 }
 
 // Processa o HTTP response do primario depois que ele respondeu
@@ -938,7 +952,8 @@ async function processPrimaryHttp(
   clientWantsStream: boolean,
   now: () => number,
   onResponseText?: (text: string, model?: string) => void,
-  clientAbortSignal?: AbortSignal
+  clientAbortSignal?: AbortSignal,
+  emptyRetryState?: { count: number }
 ): Promise<Response | undefined> {
   const primaryApiNumber = acquired.apiNumber;
   const { response, reader } = httpResult;
@@ -972,7 +987,7 @@ async function processPrimaryHttp(
   }
 
   const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk, abortController: new AbortController() };
-  return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal);
+  return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
 }
 
 // doFetchWithModel: acquireApiKey + fetch + primeiro chunk, retorna null em erro
