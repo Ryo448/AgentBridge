@@ -882,7 +882,7 @@ async function deactivatedModelsScreen(): Promise<void> {
     if (!choice || choice === 'back') return;
 
     if (choice.startsWith('deactivated:')) {
-      await deactivatedModelActionScreen(choice.slice(13));
+      await deactivatedModelActionScreen(choice.slice('deactivated:'.length));
     }
   }
 }
