@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { forwardToNvidia } from '../services/nvidia.ts';
 import {
   clearRuntimeConfig,
+  markApiRateLimited,
   onApiRequestLog,
   setRuntimeConfig
 } from '../services/runtime.ts';
@@ -405,9 +406,13 @@ test('NVIDIA forwarding fails over to the next key on HTTP 429', async () => {
   };
 
   // Loop ate `nvapi-limited` ser sorteada, levar 429 e falhar para `nvapi-spare`.
+  // Como acquireApiKey e sticky por modelo, reconfiguramos a cada tentativa para
+  // zerar o cursor e dar a `nvapi-limited` uma chance real de ser sorteada.
   let response: Response = new Response(null, { status: 503 });
   let body: any = {};
   for (let attempt = 0; attempt < 20; attempt++) {
+    clearRuntimeConfig();
+    setRuntimeConfig({ apiKeys: ['nvapi-limited', 'nvapi-spare'] });
     authorizations.length = 0;
     events.length = 0;
     response = await forwardToNvidia({ model: 'test', stream: false }, fakeFetch, 0);
@@ -492,7 +497,11 @@ test('NVIDIA forwarding skips a penalized key on later requests (1h castigo)', a
   };
 
   // Loop ate `nvapi-one` ser sorteada e entrar em castigo (determinismo).
+  // Como acquireApiKey e sticky por modelo, reconfiguramos a cada tentativa para
+  // zerar o cursor e dar a `nvapi-one` uma chance real de ser sorteada.
   for (let attempt = 0; attempt < 20; attempt++) {
+    clearRuntimeConfig();
+    setRuntimeConfig({ apiKeys: ['nvapi-one', 'nvapi-two'] });
     authorizations.length = 0;
     await forwardToNvidia({ model: 'test', stream: true }, fakeFetch, 0);
     if (authorizations.includes('Bearer nvapi-one')) break;
@@ -532,6 +541,11 @@ test('NVIDIA forwarding logs the model on started and upstream_error', async () 
 test('NVIDIA forwarding does not delegate to another API when the first stream is silent', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['nvapi-silent', 'nvapi-fast'] });
+  // Forca nvapi-fast (apiNumber 2) em castigo para que acquireApiKey sorteie
+  // deterministicamente nvapi-silent. O teste valida que um stream silencioso
+  // resulta em 504 sem delegar para outra chave -- com nvapi-fast em castigo,
+  // nao ha outra elegivel para receber a delegacao.
+  markApiRateLimited({ apiNumber: 2, model: 'test', timestamp: Date.now() });
   const authorizations: string[] = [];
   const fakeFetch: typeof fetch = async (_input, init) => {
     authorizations.push(new Headers(init?.headers).get('authorization') || '');

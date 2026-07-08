@@ -327,13 +327,14 @@ function aggregateChatCompletion(events: any[]) {
     if (event.created) created = event.created;
     if (event.model) model = event.model;
     if (event.usage) usage = event.usage;
+    if (finishReason) continue; // apos a primeira finish_reason, descarta chunks extra
     const choice = event.choices?.[0];
     if (!choice) continue;
-    if (choice.finish_reason) finishReason = choice.finish_reason;
     const delta = choice.delta || {};
     if (delta.role) role = delta.role;
     if (delta.content) content += delta.content;
     for (const toolCall of delta.tool_calls || []) mergeToolCall(toolCalls, toolCall);
+    if (choice.finish_reason) finishReason = choice.finish_reason;
   }
 
   return {
@@ -564,7 +565,7 @@ export async function forwardToNvidia(
   let activeModel = typeof body.model === 'string' ? body.model : undefined;
   const exhaustedModels: string[] = [];
   let apiNumber: number | undefined;
-  let emptyRetries = 0;
+  const emptyRetryState = { count: 0 };
 
   markApiDelayWaiting({ delayMs, timestamp: now() });
   await reserveSendSlot({ delayMs, now, sleep: rateLimitOptions.sleep });
@@ -586,6 +587,7 @@ export async function forwardToNvidia(
           activeModel = nextModel;
           body = { ...body, model: nextModel };
           attempt = 0;
+          emptyRetryState.count = 0;
           continue;
         }
       }
@@ -607,13 +609,11 @@ export async function forwardToNvidia(
         markApiRequestCancelled({ apiNumber, requestStartedAt, message: 'Cliente cancelou a request.', attempt, maxAttempts, timestamp: now() });
         return new Response(null, { status: 499 });
       }
-      const emptyRetryState = { count: emptyRetries };
       const result = await hedgeForward(
         body, activeModel!, fetchImpl, timeoutMs, rateLimitOptions,
         attempt, maxAttempts, requestStartedAt, options.resolveModel,
         upstreamBody, acquired, clientWantsStream, now, options.abortSignal, onResponseText, emptyRetryState
       );
-      emptyRetries = emptyRetryState.count;
       if (result) return result;
       // undefined: erro 429 ou HTTP error que o loop externo pode tentar de novo
       continue;
@@ -659,6 +659,7 @@ export async function forwardToNvidia(
             activeModel = nextModel;
             body = { ...body, model: nextModel };
             attempt = 0;
+            emptyRetryState.count = 0;
             continue;
           }
         }
@@ -682,8 +683,8 @@ export async function forwardToNvidia(
         markApiUpstreamError({ apiNumber, status: 204, message: emptyResponseMessage(activeModel), requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
         markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, totalTokens: usageInfo?.total_tokens, promptTokens: usageInfo?.prompt_tokens, completionTokens: usageInfo?.completion_tokens, model: activeModel, timestamp: now() });
 
-        emptyRetries++;
-        if (emptyRetries < EMPTY_RESPONSE_MAX_RETRIES) {
+        emptyRetryState.count++;
+        if (emptyRetryState.count < EMPTY_RESPONSE_MAX_RETRIES) {
           continue;
         }
 
@@ -932,6 +933,7 @@ async function hedgeForward(
   try { await primaryHttp; } catch {}
   cleanup();
   markHedgedModelSwitch({ from: activeModel, to: backupAttempt.model, apiNumber: primaryApiNumber, timestamp: Date.now() });
+  emptyRetryState.count = 0;
   return makeSuccessResponse(backupAttempt, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
 }
 

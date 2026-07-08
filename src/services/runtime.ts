@@ -639,21 +639,23 @@ export function markApiRateLimited(input: {
   // reavalia. O castigo e por (chave, modelo) e roda em paralelo.
   const current = modelCursors.get(model);
   if (apiKeyStates.length > 0) {
-    const startSearch = current !== undefined
-      ? current
-      : Math.floor(Math.random() * apiKeyStates.length);
-    let next = startSearch;
-    let firstEligible = -1;
-    for (let offset = 0; offset < apiKeyStates.length; offset++) {
-      const probe = (startSearch + offset) % apiKeyStates.length;
-      if (index === probe) continue;
-      const probeState = apiKeyStates[probe];
-      if (!isResting(probeState, timestamp, model)) {
-        firstEligible = probe;
-        break;
+    // Coleta TODOS os indices elegiveis (excluindo a chave que acabou de levar
+    // 429) e sorteia um aleatorio entre eles -- em vez de avancar linearmente
+    // (round-robin) para a proxima livre. Assim, duas chaves adjacentes nao
+    // ficam sempre preenchendo a mesma sequencia (17 -> 18 -> 19 ...): a cada
+    // 429 a nova chave e escolhida com probabilidade uniforme entre as livres.
+    const eligibleIdx: number[] = [];
+    for (let probe = 0; probe < apiKeyStates.length; probe++) {
+      if (probe === index) continue;
+      if (!isResting(apiKeyStates[probe], timestamp, model)) {
+        eligibleIdx.push(probe);
       }
     }
-    next = firstEligible >= 0 ? firstEligible : (index + 1) % apiKeyStates.length;
+    const next = eligibleIdx.length > 0
+      ? eligibleIdx.length === 1
+        ? eligibleIdx[0]
+        : eligibleIdx[Math.floor(Math.random() * eligibleIdx.length)]
+      : (index + 1) % apiKeyStates.length;
     modelCursors.set(model, next);
   }
   const penaltyEvent: ApiKeyPenaltyEvent = {
