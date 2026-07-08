@@ -164,14 +164,21 @@ export function bar(value: number, max: number, width: number): string {
 }
 
 // Logo em ASCII art para a tela de abertura.
+// Fonte "slant" (figlet) para a palavra AgentBridge -- 6 linhas.
+// As larguras visiveis sao normalizadas via padEndVisible para que o
+// centerVisible as alinhe perfeitamente. Degrede verde NVIDIA: topo em
+// accentStrong, meio em accent, base em accent -- da profundidade.
 export function logo(): string[] {
   const a = c.accent;
   const s = c.accentStrong;
-  return [
-    a('   _             _   ___      _    _         '),
-    a('  /_\\  __ _ ___ _ _| |_| _ ) _ _(_)__| |__ _ ___'),
-    s(" / _ \\/ _` / -_) ' \\  _| _ \\| '_| / _` / _` / -_)"),
-    s('/_/ \\_\\__, \\___|_||_\\__|___/|_| |_\\__,_\\__, \\___|'),
-    c.faint('      |___/                          |___/     ')
+  const raw = [
+    s('     ___                    __  ____       _     __         '),
+    s('    /   | ____ ____  ____  / /_/ __ )_____(_)___/ /___ ____ '),
+    a('   / /| |/ __ `/ _ \\/ __ \\/ __/ __  / ___/ / __  / __ `/ _ \\'),
+    a('  / ___ / /_/ /  __/ / / / /_/ /_/ / /  / / /_/ / /_/ /  __/'),
+    a(' /_/  |_\\__, /\\___/_/ /_/\\__/_____/_/  /_/\\__,_/\\__, /\\___/'),
+    c.faint('       /____/                                  /____/        ')
   ];
+  const maxLen = Math.max(...raw.map((l) => visibleLength(l)));
+  return raw.map((l) => padEndVisible(l, maxLen));
 }
