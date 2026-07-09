@@ -940,7 +940,7 @@ async function hedgeForward(
   try { await primaryHttp; } catch {}
   cleanup();
   markHedgedModelSwitch({ from: activeModel, to: backupAttempt.model, apiNumber: primaryApiNumber, timestamp: Date.now() });
-  emptyRetryState.count = 0;
+  if (emptyRetryState) emptyRetryState.count = 0;
   return makeSuccessResponse(backupAttempt, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
 }
 
