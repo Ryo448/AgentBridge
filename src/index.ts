@@ -13,6 +13,7 @@ import {
 } from './config.ts';
 import { recordTokenUsage, readTokenUsage, flushTokenUsage } from './services/token-tracking.ts';
 import { extractClientIp, extractUserPrompt, saveLastPrompt } from './services/lastPrompt.ts';
+import { saveLastError } from './services/lastErrors.ts';
 import { responsesApi, anthropicMessagesApi } from './routes/compatibility.ts';
 import { withLocalToolInstructions } from './routes/toolInstructions.ts';
 import { forwardToNvidia } from './services/nvidia.ts';
@@ -216,6 +217,10 @@ async function invokeChat(
     onResponseText: savePromptEntry
   });
 
+  if (!response.ok) {
+    void captureAndLogUpstreamError(response, body, savedWithIp);
+  }
+
   if (!promptSaved && !(response.headers.get('content-type') || '').includes('text/event-stream')) {
     void saveLastPromptAsync(response, body, savedWithIp, savePromptEntry);
   }
@@ -266,7 +271,11 @@ async function invokeChatDirect(
   const upstreamBody = options.localToolInstructions === false
     ? overridden
     : withLocalToolInstructions(overridden);
-  return forwardToNvidia(upstreamBody, fetch, undefined, {}, {});
+  const response = await forwardToNvidia(upstreamBody, fetch, undefined, {}, {});
+  if (!response.ok) {
+    void captureAndLogUpstreamError(response, body, '127.0.0.1');
+  }
+  return response;
 }
 
 // Extrai o texto de resposta assincrono do Response e salva no last_prompt.json
@@ -335,6 +344,35 @@ function extractSseContent(text: string): string {
   return content;
 }
 
+// Le o corpo de erro de uma Response nao-OK e salva no last_errors.json.
+// Clona a response para nao consumir o stream original que sera retornado ao cliente.
+async function captureAndLogUpstreamError(
+  response: Response,
+  body: Record<string, unknown>,
+  clientIp: string
+) {
+  try {
+    const cloned = response.clone();
+    let errorBody = '';
+    try {
+      errorBody = await cloned.text();
+    } catch {
+      errorBody = '';
+    }
+    const model = typeof body.model === 'string' ? body.model : '';
+    void saveLastError({
+      savedAt: '',
+      model,
+      prompt: extractUserPrompt(body),
+      errorMessage: response.statusText || `HTTP ${response.status}`,
+      errorStatus: response.status,
+      errorBody
+    });
+  } catch {
+    // Ignora — nao pode derrubar a resposta ao cliente
+  }
+}
+
 app.get('/health', (context) => {
   const runtime = getRuntimeStatus();
   return context.json({
@@ -398,11 +436,49 @@ app.post('/v1/chat/completions', async (context) => {
     });
   } catch (error: any) {
     const status = error?.status === 403 ? 403 : 503;
+    void saveLastError({
+      savedAt: '',
+      model: '',
+      prompt: '',
+      errorMessage: error?.message || String(error),
+      errorStatus: status,
+      errorBody: error?.stack || String(error)
+    });
     return context.json({ error: { type: 'proxy_error', message: error.message } }, status);
   }
 });
-app.post('/v1/responses', (context) => responsesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', { abortSignal: context.req.raw.signal })));
-app.post('/v1/messages', (context) => anthropicMessagesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', { abortSignal: context.req.raw.signal })));
+app.post('/v1/responses', async (context) => {
+  try {
+    return await responsesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', { abortSignal: context.req.raw.signal }));
+  } catch (error: any) {
+    const status = error?.status === 403 ? 403 : 503;
+    void saveLastError({
+      savedAt: '',
+      model: '',
+      prompt: '',
+      errorMessage: error?.message || String(error),
+      errorStatus: status,
+      errorBody: error?.stack || String(error)
+    });
+    return context.json({ error: { type: 'proxy_error', message: error.message } }, status);
+  }
+});
+app.post('/v1/messages', async (context) => {
+  try {
+    return await anthropicMessagesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', { abortSignal: context.req.raw.signal }));
+  } catch (error: any) {
+    const status = error?.status === 403 ? 403 : 503;
+    void saveLastError({
+      savedAt: '',
+      model: '',
+      prompt: '',
+      errorMessage: error?.message || String(error),
+      errorStatus: status,
+      errorBody: error?.stack || String(error)
+    });
+    return context.json({ error: { type: 'proxy_error', message: error.message } }, status);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Rotas DIRETAS (isoladas). Nao alteram o comportamento das rotas acima: aqui o
@@ -449,6 +525,14 @@ app.post('/v1/direct/chat/completions', async (context) => {
     });
   } catch (error: any) {
     const status = error?.status === 400 ? 400 : error?.status === 403 ? 403 : 503;
+    void saveLastError({
+      savedAt: '',
+      model: '',
+      prompt: '',
+      errorMessage: error?.message || String(error),
+      errorStatus: status,
+      errorBody: error?.stack || String(error)
+    });
     return context.json(
       { error: { type: 'proxy_error', message: error.message } },
       status
@@ -457,8 +541,44 @@ app.post('/v1/direct/chat/completions', async (context) => {
 });
 // Responses e Anthropic Messages DIRETOS: mesma traducao de protocolo das rotas
 // originais, mas passando o invocador que honra o modelo do corpo.
-app.post('/v1/direct/responses', (context) => responsesApi(context, invokeChatDirect));
-app.post('/v1/direct/messages', (context) => anthropicMessagesApi(context, invokeChatDirect));
+app.post('/v1/direct/responses', async (context) => {
+  try {
+    return await responsesApi(context, invokeChatDirect);
+  } catch (error: any) {
+    const status = error?.status === 400 ? 400 : error?.status === 403 ? 403 : 503;
+    void saveLastError({
+      savedAt: '',
+      model: '',
+      prompt: '',
+      errorMessage: error?.message || String(error),
+      errorStatus: status,
+      errorBody: error?.stack || String(error)
+    });
+    return context.json(
+      { error: { type: 'proxy_error', message: error.message } },
+      status
+    );
+  }
+});
+app.post('/v1/direct/messages', async (context) => {
+  try {
+    return await anthropicMessagesApi(context, invokeChatDirect);
+  } catch (error: any) {
+    const status = error?.status === 400 ? 400 : error?.status === 403 ? 403 : 503;
+    void saveLastError({
+      savedAt: '',
+      model: '',
+      prompt: '',
+      errorMessage: error?.message || String(error),
+      errorStatus: status,
+      errorBody: error?.stack || String(error)
+    });
+    return context.json(
+      { error: { type: 'proxy_error', message: error.message } },
+      status
+    );
+  }
+});
 
 function clientLogTarget(event: ApiRequestLogEvent) {
   const route = event.path ? `${event.method || ''} ${event.path}`.trim() : '';

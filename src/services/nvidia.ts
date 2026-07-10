@@ -22,7 +22,36 @@ import {
   type AcquireApiKeyOptions
 } from './runtime.ts';
 
+import { saveLastError } from './lastErrors.ts';
+import { extractUserPrompt } from './lastPrompt.ts';
+
 export type NvidiaFetch = typeof fetch;
+
+async function captureUpstreamErrorForLog(
+  response: Response,
+  body: Record<string, unknown>,
+  model?: string
+) {
+  try {
+    const cloned = response.clone();
+    let errorBody = '';
+    try {
+      errorBody = await cloned.text();
+    } catch {
+      errorBody = '';
+    }
+    void saveLastError({
+      savedAt: '',
+      model: model || (typeof body.model === 'string' ? body.model : ''),
+      prompt: extractUserPrompt(body),
+      errorMessage: response.statusText || `HTTP ${response.status}`,
+      errorStatus: response.status,
+      errorBody
+    });
+  } catch {
+    // Ignora — nao pode derrubar a request
+  }
+}
 
 type ForwardOptions = {
   firstResponseTimeoutMs?: number;
@@ -662,6 +691,9 @@ export async function forwardToNvidia(
           if (activeModel) exhaustedModels.push(activeModel);
           const nextModel = options.resolveModel(exhaustedModels.slice());
           if (nextModel && !exhaustedModels.includes(nextModel)) {
+            if (response.status !== 429) {
+              void captureUpstreamErrorForLog(response, body, activeModel);
+            }
             markApiModelSwitch({ from: previousModel, to: nextModel, apiNumber, reason: response.status === 429 ? 'todas as APIs em castigo 429' : `modelo recusado (HTTP ${response.status})`, timestamp: now() });
             activeModel = nextModel;
             body = { ...body, model: nextModel };
@@ -831,6 +863,9 @@ async function hedgeForward(
     if (!response.ok) {
       markApiUpstreamError({ apiNumber: primaryApiNumber, status: response.status, message: response.statusText || `NVIDIA HTTP ${response.status}`, requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
       if (response.status === 429) markApiRateLimited({ apiNumber: primaryApiNumber, model: activeModel, retryAfterMs: parseRetryAfterMs(response), timestamp: now() });
+      if (response.status !== 429) {
+        void captureUpstreamErrorForLog(response, body, activeModel);
+      }
       markApiResponseCompleted({ apiNumber: primaryApiNumber, requestStartedAt, attempt, maxAttempts, timestamp: now() });
       await reader.cancel().catch(() => {});
       cleanup();
@@ -1041,6 +1076,9 @@ async function doFetchWithModel(
     if (!response.ok) {
       markApiUpstreamError({ apiNumber, status: response.status, message: response.statusText || `NVIDIA HTTP ${response.status}`, requestStartedAt, model, attempt: 1, maxAttempts: 1, timestamp: Date.now() });
       if (response.status === 429) markApiRateLimited({ apiNumber, model, retryAfterMs: parseRetryAfterMs(response), timestamp: Date.now() });
+      if (response.status !== 429) {
+        void captureUpstreamErrorForLog(response, body, model);
+      }
       markApiResponseCompleted({ apiNumber, requestStartedAt, attempt: 1, maxAttempts: 1, timestamp: Date.now() });
       await reader.cancel().catch(() => {});
       return null;
