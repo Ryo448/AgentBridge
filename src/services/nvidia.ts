@@ -64,6 +64,14 @@ type ForwardOptions = {
   abortSignal?: AbortSignal;
 };
 
+type SseUpstreamError = {
+  status: number;
+  message: string;
+  type?: string;
+  code?: unknown;
+  event: Record<string, unknown>;
+};
+
 type ToolCallDraft = {
   id?: string;
   type: 'function';
@@ -73,6 +81,7 @@ type ToolCallDraft = {
   };
 };
 
+const EMPTY_RESPONSE_MAX_RETRIES = 3;
 const DEFAULT_STREAM_KEEP_ALIVE_MS = 5_000;
 const SSE_KEEP_ALIVE_CHUNK = new TextEncoder().encode(': keep-alive\n\n');
 const SSE_DONE_CHUNK = new TextEncoder().encode('data: [DONE]\n\n');
@@ -325,6 +334,27 @@ function parseSseEvents(text: string) {
     .filter((event): event is Record<string, unknown> => event !== undefined);
 }
 
+
+function extractSseUpstreamError(events: Record<string, unknown>[]): SseUpstreamError | undefined {
+  for (const event of events) {
+    const error = event.error;
+    if (!error || typeof error !== 'object') continue;
+    const payload = error as Record<string, unknown>;
+    const code = payload.code;
+    const numericCode = typeof code === 'number' ? code : typeof code === 'string' ? Number(code) : undefined;
+    const status = Number.isFinite(numericCode) && numericCode && numericCode >= 400
+      ? numericCode
+      : 500;
+    return {
+      status,
+      message: typeof payload.message === 'string' ? payload.message : JSON.stringify(payload),
+      type: typeof payload.type === 'string' ? payload.type : undefined,
+      code,
+      event
+    };
+  }
+  return undefined;
+}
 function mergeToolCall(
   drafts: Map<number, ToolCallDraft>,
   toolCall: any
@@ -402,6 +432,170 @@ function emptyResponseMessage(model?: string) {
   return `A NVIDIA retornou uma resposta vazia${model ? ` para o modelo ${model}` : ''}.`;
 }
 
+function pickDebugHeaders(headers: Headers) {
+  const useful = [
+    'content-type',
+    'date',
+    'server',
+    'x-request-id',
+    'x-trace-id',
+    'x-correlation-id',
+    'x-nvidia-request-id',
+    'nvcf-reqid',
+    'nvcf-request-id'
+  ];
+  const picked: Record<string, string> = {};
+  for (const name of useful) {
+    const value = headers.get(name);
+    if (value) picked[name] = value;
+  }
+  return picked;
+}
+
+function summarizeSseEvent(event: any, index: number) {
+  const choice = event?.choices?.[0];
+  const delta = choice?.delta || {};
+  return {
+    index,
+    id: typeof event?.id === 'string' ? event.id : undefined,
+    model: typeof event?.model === 'string' ? event.model : undefined,
+    created: typeof event?.created === 'number' ? event.created : undefined,
+    finish_reason: choice?.finish_reason ?? null,
+    delta_keys: Object.keys(delta),
+    role: typeof delta.role === 'string' ? delta.role : undefined,
+    content_length: typeof delta.content === 'string' ? delta.content.length : undefined,
+    content_preview: typeof delta.content === 'string' ? delta.content.slice(0, 120) : undefined,
+    tool_call_count: Array.isArray(delta.tool_calls) ? delta.tool_calls.length : 0,
+    usage: event?.usage || undefined
+  };
+}
+
+function buildEmptyResponseDebug(input: {
+  response: Response;
+  text: string;
+  completion: any;
+  apiNumber: number;
+  model?: string;
+  emptyAttempt: number;
+  maxEmptyRetries: number;
+  requestStartedAt: number;
+}) {
+  const events = parseSseEvents(input.text);
+  return JSON.stringify({
+    reason: 'empty_completion',
+    api_number: input.apiNumber,
+    model: input.model || '',
+    empty_attempt: input.emptyAttempt,
+    max_empty_retries: input.maxEmptyRetries,
+    elapsed_ms: Date.now() - input.requestStartedAt,
+    upstream: {
+      status: input.response.status,
+      status_text: input.response.statusText,
+      headers: pickDebugHeaders(input.response.headers)
+    },
+    aggregate: {
+      finish_reason: input.completion?.choices?.[0]?.finish_reason ?? null,
+      message_role: input.completion?.choices?.[0]?.message?.role,
+      message_content_length: typeof input.completion?.choices?.[0]?.message?.content === 'string'
+        ? input.completion.choices[0].message.content.length
+        : undefined,
+      tool_call_count: Array.isArray(input.completion?.choices?.[0]?.message?.tool_calls)
+        ? input.completion.choices[0].message.tool_calls.length
+        : 0,
+      usage: input.completion?.usage || undefined
+    },
+    sse: {
+      event_count: events.length,
+      events: events.slice(0, 8).map((event, index) => summarizeSseEvent(event, index)),
+      truncated_events: Math.max(0, events.length - 8)
+    },
+    raw: {
+      byte_length: new TextEncoder().encode(input.text).length,
+      char_length: input.text.length,
+      preview: input.text.slice(0, 2000)
+    }
+  }, null, 2);
+}
+
+
+function buildSseUpstreamErrorDebug(input: {
+  response: Response;
+  text: string;
+  events: Record<string, unknown>[];
+  apiNumber: number;
+  model?: string;
+  sseError: SseUpstreamError;
+  requestStartedAt: number;
+}) {
+  return JSON.stringify({
+    reason: 'sse_upstream_error',
+    api_number: input.apiNumber,
+    model: input.model || '',
+    elapsed_ms: Date.now() - input.requestStartedAt,
+    upstream: {
+      status: input.response.status,
+      status_text: input.response.statusText,
+      headers: pickDebugHeaders(input.response.headers)
+    },
+    sse_error: {
+      status: input.sseError.status,
+      message: input.sseError.message,
+      type: input.sseError.type,
+      code: input.sseError.code,
+      event: input.sseError.event
+    },
+    sse: {
+      event_count: input.events.length,
+      events: input.events.slice(0, 8).map((event, index) => summarizeSseEvent(event, index)),
+      truncated_events: Math.max(0, input.events.length - 8)
+    },
+    raw: {
+      byte_length: new TextEncoder().encode(input.text).length,
+      char_length: input.text.length,
+      preview: input.text.slice(0, 2000)
+    }
+  }, null, 2);
+}
+
+function logSseUpstreamError(input: {
+  body: Record<string, unknown>;
+  response: Response;
+  text: string;
+  events: Record<string, unknown>[];
+  apiNumber: number;
+  model?: string;
+  sseError: SseUpstreamError;
+  requestStartedAt: number;
+}) {
+  void saveLastError({
+    savedAt: '',
+    model: input.model || '',
+    prompt: extractUserPrompt(input.body),
+    errorMessage: `A NVIDIA retornou erro SSE HTTP ${input.sseError.status}${input.model ? ` para o modelo ${input.model}` : ''}: ${input.sseError.message}`,
+    errorStatus: input.sseError.status,
+    errorBody: buildSseUpstreamErrorDebug(input)
+  });
+}
+function logEmptyNvidiaResponse(input: {
+  body: Record<string, unknown>;
+  response: Response;
+  text: string;
+  completion: any;
+  apiNumber: number;
+  model?: string;
+  emptyAttempt: number;
+  maxEmptyRetries: number;
+  requestStartedAt: number;
+}) {
+  void saveLastError({
+    savedAt: '',
+    model: input.model || '',
+    prompt: extractUserPrompt(input.body),
+    errorMessage: `${emptyResponseMessage(input.model)} Tentativa vazia ${input.emptyAttempt}/${input.maxEmptyRetries}.`,
+    errorStatus: 204,
+    errorBody: buildEmptyResponseDebug(input)
+  });
+}
 function ensureSseDone(text: string) {
   if (/(^|\n)data:\s*\[DONE\]\s*$/m.test(text.trimEnd())) return text;
   const separator = text.endsWith('\n\n') || text.endsWith('\r\n\r\n') ? '' : '\n\n';
@@ -472,6 +666,7 @@ type ModelAttempt = {
 // ---------------------------------------------------------------------------
 async function makeSuccessResponse(
   attempt: ModelAttempt,
+  sourceBody: Record<string, unknown>,
   requestStartedAt: number,
   maxAttempts: number,
   clientWantsStream: boolean,
@@ -481,8 +676,44 @@ async function makeSuccessResponse(
   emptyRetryState?: { count: number }
 ): Promise<Response | undefined> {
   const text = await readRemainingText(attempt.firstChunk, attempt.reader);
-  const completion = aggregateChatCompletion(parseSseEvents(text));
+  const events = parseSseEvents(text);
+  const sseError = extractSseUpstreamError(events);
+  const completion = aggregateChatCompletion(events);
   const usageInfo = (completion as { usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } }).usage;
+
+  if (sseError) {
+    markApiUpstreamError({
+      apiNumber: attempt.apiNumber,
+      status: sseError.status,
+      message: sseError.message,
+      requestStartedAt,
+      attempt: 1,
+      maxAttempts,
+      model: attempt.model
+    });
+    markApiResponseCompleted({
+      apiNumber: attempt.apiNumber,
+      requestStartedAt,
+      attempt: 1,
+      maxAttempts,
+      totalTokens: usageInfo?.total_tokens,
+      promptTokens: usageInfo?.prompt_tokens,
+      completionTokens: usageInfo?.completion_tokens,
+      model: attempt.model,
+      timestamp: Date.now()
+    });
+    logSseUpstreamError({
+      body: sourceBody,
+      response: attempt.response,
+      text,
+      events,
+      apiNumber: attempt.apiNumber,
+      model: attempt.model,
+      sseError,
+      requestStartedAt
+    });
+    return undefined;
+  }
 
   if (!completionHasOutput(completion)) {
     markApiUpstreamError({
@@ -505,8 +736,30 @@ async function makeSuccessResponse(
       model: attempt.model,
       timestamp: Date.now()
     });
-    if (emptyRetryState) emptyRetryState.count++;
-    return undefined;
+    const emptyAttempt = (emptyRetryState?.count || 0) + 1;
+    logEmptyNvidiaResponse({
+      body: sourceBody,
+      response: attempt.response,
+      text,
+      completion,
+      apiNumber: attempt.apiNumber,
+      model: attempt.model,
+      emptyAttempt,
+      maxEmptyRetries: EMPTY_RESPONSE_MAX_RETRIES,
+      requestStartedAt
+    });
+    if (emptyRetryState) {
+      emptyRetryState.count++;
+      if (emptyRetryState.count < EMPTY_RESPONSE_MAX_RETRIES) {
+        return undefined;
+      }
+    }
+    if (clientWantsStream) {
+      const headers = cloneHeaders(attempt.response);
+      headers.set('content-type', 'text/event-stream');
+      return new Response(ensureSseDone(text), { status: 200, headers });
+    }
+    return Response.json(completion, { status: 200, headers: { 'cache-control': 'no-store' } });
   }
 
   onResponseText?.(String(completion.choices?.[0]?.message?.content || ''), attempt.model);
@@ -705,14 +958,61 @@ export async function forwardToNvidia(
       }
 
       const text = await readRemainingText(value, reader);
-      const completion = aggregateChatCompletion(parseSseEvents(text));
+      const events = parseSseEvents(text);
+      const sseError = extractSseUpstreamError(events);
+      const completion = aggregateChatCompletion(events);
       const usageInfo = (completion as { usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number } }).usage;
+      if (sseError) {
+        markApiUpstreamError({ apiNumber, status: sseError.status, message: sseError.message, requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
+        markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, totalTokens: usageInfo?.total_tokens, promptTokens: usageInfo?.prompt_tokens, completionTokens: usageInfo?.completion_tokens, model: activeModel, timestamp: now() });
+        logSseUpstreamError({
+          body,
+          response,
+          text,
+          events,
+          apiNumber,
+          model: activeModel,
+          sseError,
+          requestStartedAt
+        });
+        if (attempt < maxAttempts) {
+          continue;
+        }
+        if (clientWantsStream) {
+          const headers = cloneHeaders(response);
+          headers.set('content-type', 'text/event-stream');
+          return new Response(SSE_DONE_CHUNK, { status: 200, headers });
+        }
+        return Response.json(completion, { status: 200, headers: { 'cache-control': 'no-store' } });
+      }
+
       if (!completionHasOutput(completion)) {
         markApiUpstreamError({ apiNumber, status: 204, message: emptyResponseMessage(activeModel), requestStartedAt, model: activeModel, attempt, maxAttempts, timestamp: now() });
         markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, totalTokens: usageInfo?.total_tokens, promptTokens: usageInfo?.prompt_tokens, completionTokens: usageInfo?.completion_tokens, model: activeModel, timestamp: now() });
 
+        const emptyAttempt = emptyRetryState.count + 1;
+        logEmptyNvidiaResponse({
+          body,
+          response,
+          text,
+          completion,
+          apiNumber,
+          model: activeModel,
+          emptyAttempt,
+          maxEmptyRetries: EMPTY_RESPONSE_MAX_RETRIES,
+          requestStartedAt
+        });
         emptyRetryState.count++;
-        continue;
+        if (emptyRetryState.count < EMPTY_RESPONSE_MAX_RETRIES) {
+          continue;
+        }
+
+        if (clientWantsStream) {
+          const headers = cloneHeaders(response);
+          headers.set('content-type', 'text/event-stream');
+          return new Response(ensureSseDone(text), { status: 200, headers });
+        }
+        return Response.json(completion, { status: 200, headers: { 'cache-control': 'no-store' } });
       }
       onResponseText?.(String(completion.choices?.[0]?.message?.content || ''), activeModel);
       markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, totalTokens: usageInfo?.total_tokens, promptTokens: usageInfo?.prompt_tokens, completionTokens: usageInfo?.completion_tokens, model: activeModel, timestamp: now() });
@@ -865,7 +1165,7 @@ async function hedgeForward(
 
     const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk, abortController: primaryAbort };
     cleanup();
-    return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
+    return makeSuccessResponse(ma, body, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
   }
 
   // ---- Caso B: Hedge timeout! Primario nao respondeu HTTP em 60s ----
@@ -940,7 +1240,7 @@ async function hedgeForward(
         await backupAttempt.reader.cancel().catch(() => {});
         const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk: primaryChunk, abortController: primaryAbort };
         cleanup();
-        return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
+        return makeSuccessResponse(ma, body, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
       }
 
       // Primario respondeu HTTP 200 mas chunk vazio — continua com backup
@@ -956,7 +1256,7 @@ async function hedgeForward(
   cleanup();
   markHedgedModelSwitch({ from: activeModel, to: backupAttempt.model, apiNumber: primaryApiNumber, timestamp: Date.now() });
   if (emptyRetryState) emptyRetryState.count = 0;
-  return makeSuccessResponse(backupAttempt, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
+  return makeSuccessResponse(backupAttempt, body, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
 }
 
 // Processa o HTTP response do primario depois que ele respondeu
@@ -1011,7 +1311,7 @@ async function processPrimaryHttp(
   }
 
   const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk, abortController: new AbortController() };
-  return makeSuccessResponse(ma, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
+  return makeSuccessResponse(ma, body, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
 }
 
 // doFetchWithModel: acquireApiKey + fetch + primeiro chunk, retorna null em erro

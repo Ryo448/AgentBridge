@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { forwardToNvidia } from '../services/nvidia.ts';
+import { setLastErrorDirectory } from '../services/lastErrors.ts';
 import {
   clearRuntimeConfig,
   markApiRateLimited,
@@ -8,6 +12,25 @@ import {
   setRuntimeConfig
 } from '../services/runtime.ts';
 
+type LastErrorsFile = { entries: Array<{ errorMessage: string; errorStatus: number; errorBody: string }> };
+
+async function readLastErrorsEventually(directory: string, expectedMessage?: RegExp): Promise<LastErrorsFile> {
+  const filePath = path.join(directory, 'last_errors.json');
+  let lastError: unknown;
+  for (let index = 0; index < 30; index++) {
+    try {
+      if (existsSync(filePath)) {
+        const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as LastErrorsFile;
+        if (parsed.entries?.length && (!expectedMessage || expectedMessage.test(parsed.entries[0].errorMessage))) return parsed;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (lastError) throw lastError;
+  return JSON.parse(readFileSync(filePath, 'utf8')) as LastErrorsFile;
+}
 test('NVIDIA forwarding picks a key among the available ones (no 429) and preserves streaming responses', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['nvapi-first', 'nvapi-second'] });
@@ -295,6 +318,8 @@ test('NVIDIA forwarding captures aggregated response text for non-streaming clie
 test('NVIDIA forwarding silently retries empty non-streaming completions', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['nvapi-empty'], requestDelayMs: 0 });
+  const errorDirectory = mkdtempSync(path.join(tmpdir(), 'agentbridge-empty-errors-'));
+  setLastErrorDirectory(errorDirectory);
   const events: Array<{ type: string; status?: number; message?: string; model?: string }> = [];
   const unsubscribe = onApiRequestLog((event) => {
     events.push({ type: event.type, status: event.status, message: event.message, model: event.model });
@@ -323,32 +348,102 @@ test('NVIDIA forwarding silently retries empty non-streaming completions', async
   const upstreamError = events.find((event) => event.type === 'upstream_error');
   assert.equal(upstreamError?.status, 204);
   assert.equal(upstreamError?.model, 'empty-model');
+  setLastErrorDirectory('');
   unsubscribe();
 });
-test('NVIDIA forwarding keeps retrying empty completions until real content arrives', async () => {
+test('NVIDIA forwarding returns empty response with 200 after 3 empty retries', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['nvapi-empty'], requestDelayMs: 0 });
+  const errorDirectory = mkdtempSync(path.join(tmpdir(), 'agentbridge-empty-errors-'));
+  setLastErrorDirectory(errorDirectory);
   let calls = 0;
   const fakeFetch: typeof fetch = async () => {
     calls++;
-    if (calls <= 4) {
+    return new Response([
+      'data: {"id":"chatcmpl-empty","model":"empty-model","choices":[{"delta":{"role":"assistant"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":0,"total_tokens":3}}\n\n',
+      'data: [DONE]\n\n'
+    ].join(''), {
+      headers: {
+        'content-type': 'text/event-stream',
+        'x-request-id': `empty-request-${calls}`
+      }
+    });
+  };
+
+  try {
+    const response = await forwardToNvidia({ model: 'empty-model', stream: false }, fakeFetch, 0);
+    const body = await response.json() as any;
+
+    assert.equal(response.status, 200);
+    assert.equal(calls, 3);
+    const content = body.choices?.[0]?.message?.content;
+    assert.equal(content, '');
+
+    const errors = await readLastErrorsEventually(errorDirectory, new RegExp('Tentativa vazia 3/3'));
+    assert.equal(errors.entries[0].errorStatus, 204);
+    assert.match(errors.entries[0].errorMessage, /Tentativa vazia 3\/3/);
+    const debug = JSON.parse(errors.entries[0].errorBody) as any;
+    assert.equal(debug.reason, 'empty_completion');
+    assert.equal(debug.empty_attempt, 3);
+    assert.equal(debug.max_empty_retries, 3);
+    assert.equal(debug.upstream.status, 200);
+    assert.equal(debug.upstream.headers['x-request-id'], 'empty-request-3');
+    assert.equal(debug.sse.event_count, 1);
+    assert.equal(debug.sse.events[0].finish_reason, 'stop');
+    assert.deepEqual(debug.sse.events[0].delta_keys, ['role']);
+    assert.equal(debug.aggregate.usage.total_tokens, 3);
+    assert.ok(debug.raw.preview.includes('chatcmpl-empty'));
+  } finally {
+    setLastErrorDirectory('');
+  }
+});
+
+test('NVIDIA forwarding treats SSE error payloads inside HTTP 200 as retryable upstream errors', async () => {
+  clearRuntimeConfig();
+  setRuntimeConfig({ apiKeys: ['nvapi-sse-error-a', 'nvapi-sse-error-b', 'nvapi-sse-error-c'], requestDelayMs: 0 });
+  const errorDirectory = mkdtempSync(path.join(tmpdir(), 'agentbridge-sse-errors-'));
+  setLastErrorDirectory(errorDirectory);
+  let calls = 0;
+  const fakeFetch: typeof fetch = async () => {
+    calls++;
+    if (calls <= 2) {
       return new Response([
-        'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":0,"total_tokens":3}}\n\n',
+        'data: {"error":{"message":"Internal server error","type":"internal_server_error","code":500}}\n\n',
         'data: [DONE]\n\n'
-      ].join(''), { headers: { 'content-type': 'text/event-stream' } });
+      ].join(''), {
+        headers: {
+          'content-type': 'text/event-stream',
+          'nvcf-reqid': `sse-error-${calls}`
+        }
+      });
     }
     return new Response([
-      'data: {"choices":[{"delta":{"content":"real after empties"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":3,"total_tokens":6}}\n\n',
+      'data: {"choices":[{"delta":{"content":"real"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n',
       'data: [DONE]\n\n'
     ].join(''), { headers: { 'content-type': 'text/event-stream' } });
   };
 
-  const response = await forwardToNvidia({ model: 'empty-model', stream: false }, fakeFetch, 0);
-  const body = await response.json() as any;
+  try {
+    const response = await forwardToNvidia({ model: 'sse-error-model', stream: false }, fakeFetch, 0);
+    const body = await response.json() as any;
 
-  assert.equal(response.status, 200);
-  assert.equal(calls, 5);
-  assert.equal(body.choices?.[0]?.message?.content, 'real after empties');
+    assert.equal(response.status, 200);
+    assert.equal(calls, 3);
+    assert.equal(body.choices[0].message.content, 'real');
+
+    const errors = await readLastErrorsEventually(errorDirectory, new RegExp('erro SSE HTTP 500'));
+    assert.equal(errors.entries[0].errorStatus, 500);
+    const debug = JSON.parse(errors.entries[0].errorBody) as any;
+    assert.equal(debug.reason, 'sse_upstream_error');
+    assert.equal(debug.sse_error.message, 'Internal server error');
+    assert.equal(debug.sse_error.type, 'internal_server_error');
+    assert.equal(debug.sse_error.code, 500);
+    assert.equal(debug.upstream.status, 200);
+    assert.equal(debug.upstream.headers['nvcf-reqid'], 'sse-error-2');
+    assert.ok(debug.raw.preview.includes('internal_server_error'));
+  } finally {
+    setLastErrorDirectory('');
+  }
 });
 test('NVIDIA forwarding logs upstream HTTP errors', async () => {
   clearRuntimeConfig();
