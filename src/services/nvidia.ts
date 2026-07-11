@@ -82,6 +82,7 @@ type ToolCallDraft = {
 };
 
 const EMPTY_RESPONSE_MAX_RETRIES = 3;
+const MAX_500_RETRIES = 3;
 const DEFAULT_STREAM_KEEP_ALIVE_MS = 5_000;
 const SSE_KEEP_ALIVE_CHUNK = new TextEncoder().encode(': keep-alive\n\n');
 const SSE_DONE_CHUNK = new TextEncoder().encode('data: [DONE]\n\n');
@@ -673,7 +674,8 @@ async function makeSuccessResponse(
   onResponseText?: (text: string, model?: string) => void,
   keepAliveMs?: number,
   abortSignal?: AbortSignal,
-  emptyRetryState?: { count: number }
+  emptyRetryState?: { count: number },
+  http500State?: { count: number }
 ): Promise<Response | undefined> {
   const text = await readRemainingText(attempt.firstChunk, attempt.reader);
   const events = parseSseEvents(text);
@@ -712,6 +714,7 @@ async function makeSuccessResponse(
       sseError,
       requestStartedAt
     });
+    if (sseError.status === 500 && http500State) http500State.count++;
     return undefined;
   }
 
@@ -754,6 +757,7 @@ async function makeSuccessResponse(
         return undefined;
       }
     }
+    if (http500State) http500State.count++;
     if (clientWantsStream) {
       const headers = cloneHeaders(attempt.response);
       headers.set('content-type', 'text/event-stream');
@@ -844,6 +848,7 @@ export async function forwardToNvidia(
   const exhaustedModels: string[] = [];
   let apiNumber: number | undefined;
   const emptyRetryState = { count: 0 };
+  const http500State = { count: 0 };
 
   markApiDelayWaiting({ delayMs, timestamp: now() });
   await reserveSendSlot({ delayMs, now, sleep: rateLimitOptions.sleep });
@@ -890,10 +895,24 @@ export async function forwardToNvidia(
       const result = await hedgeForward(
         body, activeModel!, fetchImpl, timeoutMs, rateLimitOptions,
         attempt, maxAttempts, requestStartedAt, options.resolveModel,
-        upstreamBody, acquired, clientWantsStream, now, options.abortSignal, onResponseText, emptyRetryState
+        upstreamBody, acquired, clientWantsStream, now, options.abortSignal, onResponseText, emptyRetryState, http500State, exhaustedModels
       );
       if (result) return result;
       // undefined: erro 429 ou HTTP error que o loop externo pode tentar de novo
+      // Se acumulou MAX_500_RETRIES erros 500, troca de modelo
+      if (http500State.count >= MAX_500_RETRIES && options.resolveModel) {
+        const previousModel = activeModel;
+        if (activeModel) exhaustedModels.push(activeModel);
+        const nextModel = options.resolveModel(exhaustedModels.slice());
+        if (nextModel && !exhaustedModels.includes(nextModel)) {
+          markApiModelSwitch({ from: previousModel, to: nextModel, apiNumber, reason: `modelo em erro HTTP 500 apos ${MAX_500_RETRIES} tentativas`, timestamp: now() });
+          activeModel = nextModel;
+          body = { ...body, model: nextModel };
+          attempt = 0;
+          emptyRetryState.count = 0;
+          http500State.count = 0;
+        }
+      }
       continue;
     }
 
@@ -927,8 +946,13 @@ export async function forwardToNvidia(
         markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, timestamp: now() });
         await reader.cancel().catch(() => {});
 
-        const isModelFailover = response.status === 429 || response.status === 400 || response.status === 404;
-        if (isModelFailover && options.resolveModel) {
+        if (response.status === 500) http500State.count++;
+
+        const shouldFailover =
+          response.status === 429 || response.status === 400 || response.status === 404 ||
+          (response.status === 500 && http500State.count >= MAX_500_RETRIES);
+
+        if (shouldFailover && options.resolveModel) {
           const previousModel = activeModel;
           if (activeModel) exhaustedModels.push(activeModel);
           const nextModel = options.resolveModel(exhaustedModels.slice());
@@ -936,13 +960,22 @@ export async function forwardToNvidia(
             if (response.status !== 429) {
               void captureUpstreamErrorForLog(response, body, activeModel);
             }
-            markApiModelSwitch({ from: previousModel, to: nextModel, apiNumber, reason: response.status === 429 ? 'todas as APIs em castigo 429' : `modelo recusado (HTTP ${response.status})`, timestamp: now() });
+            const reason = response.status === 429
+              ? 'todas as APIs em castigo 429'
+              : response.status === 500
+                ? `modelo em erro HTTP 500 apos ${MAX_500_RETRIES} tentativas`
+                : `modelo recusado (HTTP ${response.status})`;
+            markApiModelSwitch({ from: previousModel, to: nextModel, apiNumber, reason, timestamp: now() });
             activeModel = nextModel;
             body = { ...body, model: nextModel };
             attempt = 0;
             emptyRetryState.count = 0;
+            http500State.count = 0;
             continue;
           }
+        }
+        if (response.status === 500 && http500State.count < MAX_500_RETRIES && attempt < maxAttempts) {
+          continue;
         }
         return responseFromUpstream(response);
       }
@@ -975,6 +1008,25 @@ export async function forwardToNvidia(
           sseError,
           requestStartedAt
         });
+        if (sseError.status === 500 && http500State) http500State.count++;
+
+        const sse500Failover = sseError.status === 500 && http500State && http500State.count >= MAX_500_RETRIES && options.resolveModel;
+
+        if (sse500Failover && options.resolveModel) {
+          const previousModel = activeModel;
+          if (activeModel) exhaustedModels.push(activeModel);
+          const nextModel = options.resolveModel(exhaustedModels.slice());
+          if (nextModel && !exhaustedModels.includes(nextModel)) {
+            markApiModelSwitch({ from: previousModel, to: nextModel, apiNumber, reason: `modelo em erro SSE HTTP 500 apos ${MAX_500_RETRIES} tentativas`, timestamp: now() });
+            activeModel = nextModel;
+            body = { ...body, model: nextModel };
+            attempt = 0;
+            emptyRetryState.count = 0;
+            http500State.count = 0;
+            continue;
+          }
+        }
+
         if (attempt < maxAttempts) {
           continue;
         }
@@ -1005,6 +1057,23 @@ export async function forwardToNvidia(
         emptyRetryState.count++;
         if (emptyRetryState.count < EMPTY_RESPONSE_MAX_RETRIES) {
           continue;
+        }
+
+        if (http500State) http500State.count++;
+        const emptyFailover = http500State && http500State.count >= MAX_500_RETRIES && options.resolveModel;
+        if (emptyFailover && options.resolveModel) {
+          const previousModel = activeModel;
+          if (activeModel) exhaustedModels.push(activeModel);
+          const nextModel = options.resolveModel(exhaustedModels.slice());
+          if (nextModel && !exhaustedModels.includes(nextModel)) {
+            markApiModelSwitch({ from: previousModel, to: nextModel, apiNumber, reason: `modelo em resposta vazia apos ${MAX_500_RETRIES} tentativas`, timestamp: now() });
+            activeModel = nextModel;
+            body = { ...body, model: nextModel };
+            attempt = 0;
+            emptyRetryState.count = 0;
+            http500State.count = 0;
+            continue;
+          }
         }
 
         if (clientWantsStream) {
@@ -1062,7 +1131,9 @@ async function hedgeForward(
   now: () => number,
   clientAbortSignal?: AbortSignal,
   onResponseText?: (text: string) => void,
-  emptyRetryState?: { count: number }
+  emptyRetryState?: { count: number },
+  http500State?: { count: number },
+  exhaustedModels?: string[]
 ): Promise<Response | undefined> {
   const primaryApiNumber = acquired.apiNumber;
   const primaryAbort = new AbortController();
@@ -1149,7 +1220,21 @@ async function hedgeForward(
       markApiResponseCompleted({ apiNumber: primaryApiNumber, requestStartedAt, attempt, maxAttempts, timestamp: now() });
       await reader.cancel().catch(() => {});
       cleanup();
-      return undefined; // loop externo tenta failover 400/404
+      if (response.status === 500 && http500State) {
+        http500State.count++;
+        if (http500State.count >= MAX_500_RETRIES && resolveModelFn) {
+          const previousModel = activeModel;
+          const exhausted = exhaustedModels ? exhaustedModels.slice() : [];
+          if (previousModel) exhausted.push(previousModel);
+          const nextModel = resolveModelFn(exhausted);
+          if (nextModel && !exhausted.includes(nextModel)) {
+            markApiModelSwitch({ from: previousModel, to: nextModel, apiNumber: primaryApiNumber, reason: `modelo em erro HTTP 500 apos ${MAX_500_RETRIES} tentativas`, timestamp: now() });
+            if (exhaustedModels) exhaustedModels.push(previousModel!);
+            http500State.count = 0;
+          }
+        }
+      }
+      return undefined; // loop externo tenta de novo ou faz failover
     }
 
     // HTTP 200! Le o primeiro chunk
@@ -1165,7 +1250,7 @@ async function hedgeForward(
 
     const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk, abortController: primaryAbort };
     cleanup();
-    return makeSuccessResponse(ma, body, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
+    return makeSuccessResponse(ma, body, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState, http500State);
   }
 
   // ---- Caso B: Hedge timeout! Primario nao respondeu HTTP em 60s ----
@@ -1177,7 +1262,7 @@ async function hedgeForward(
     cleanup();
     const httpResult = await primaryHttp;
     if (!httpResult) { cleanup(); return undefined; }
-    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText, clientAbortSignal, emptyRetryState);
+    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText, clientAbortSignal, emptyRetryState, http500State);
   }
   console.log(`[HEDGE] Backup modelo: ${backupModel}`);
 
@@ -1202,7 +1287,7 @@ async function hedgeForward(
     cleanup();
     const httpResult = await primaryHttp;
     if (!httpResult) { cleanup(); return undefined; }
-    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText, clientAbortSignal, emptyRetryState);
+    return processPrimaryHttp(httpResult, body, activeModel, fetchImpl, timeoutMs, rateLimitOptions, attempt, maxAttempts, requestStartedAt, resolveModelFn, upstreamBody, acquired, clientWantsStream, now, onResponseText, clientAbortSignal, emptyRetryState, http500State);
   }
 
   // ---- Backup respondeu (HTTP 200 + primeiro chunk). Grace period. ----
@@ -1240,7 +1325,7 @@ async function hedgeForward(
         await backupAttempt.reader.cancel().catch(() => {});
         const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk: primaryChunk, abortController: primaryAbort };
         cleanup();
-        return makeSuccessResponse(ma, body, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
+        return makeSuccessResponse(ma, body, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState, http500State);
       }
 
       // Primario respondeu HTTP 200 mas chunk vazio — continua com backup
@@ -1256,7 +1341,7 @@ async function hedgeForward(
   cleanup();
   markHedgedModelSwitch({ from: activeModel, to: backupAttempt.model, apiNumber: primaryApiNumber, timestamp: Date.now() });
   if (emptyRetryState) emptyRetryState.count = 0;
-  return makeSuccessResponse(backupAttempt, body, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
+  return makeSuccessResponse(backupAttempt, body, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState, http500State);
 }
 
 // Processa o HTTP response do primario depois que ele respondeu
@@ -1277,7 +1362,8 @@ async function processPrimaryHttp(
   now: () => number,
   onResponseText?: (text: string, model?: string) => void,
   clientAbortSignal?: AbortSignal,
-  emptyRetryState?: { count: number }
+  emptyRetryState?: { count: number },
+  http500State?: { count: number }
 ): Promise<Response | undefined> {
   const primaryApiNumber = acquired.apiNumber;
   const { response, reader } = httpResult;
@@ -1311,7 +1397,7 @@ async function processPrimaryHttp(
   }
 
   const ma: ModelAttempt = { model: activeModel, apiNumber: primaryApiNumber, response, reader, firstChunk, abortController: new AbortController() };
-  return makeSuccessResponse(ma, body, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState);
+  return makeSuccessResponse(ma, body, requestStartedAt, maxAttempts, clientWantsStream, onResponseText, undefined, clientAbortSignal, emptyRetryState, http500State);
 }
 
 // doFetchWithModel: acquireApiKey + fetch + primeiro chunk, retorna null em erro
