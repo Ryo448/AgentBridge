@@ -14,6 +14,7 @@ import {
 import { recordTokenUsage, readTokenUsage, flushTokenUsage } from './services/token-tracking.ts';
 import { extractClientIp, extractUserPrompt, saveLastPrompt } from './services/lastPrompt.ts';
 import { saveLastError } from './services/lastErrors.ts';
+import { saveEmptyPrompt } from './services/emptyPrompt.ts';
 import { responsesApi, anthropicMessagesApi } from './routes/compatibility.ts';
 import { withLocalToolInstructions } from './routes/toolInstructions.ts';
 import { forwardToNvidia } from './services/nvidia.ts';
@@ -157,7 +158,7 @@ app.use('/v1/*', async (context, next) => {
 async function invokeChat(
   body: Record<string, unknown>,
   clientIp: string,
-  options: { abortSignal?: AbortSignal; localToolInstructions?: boolean } = {}
+  options: { abortSignal?: AbortSignal; localToolInstructions?: boolean; protocol?: string } = {}
 ) {
   // Roteamento de modelo (vale para /v1/chat/completions, /v1/responses e
   // /v1/messages):
@@ -193,6 +194,20 @@ async function invokeChat(
   const upstreamBody = options.localToolInstructions === false
     ? overridden
     : withLocalToolInstructions(overridden);
+
+  // Detecta prompt vazio ANTES de processar: registra no empty_prompt.json
+  // o body completo (messages, campo original, content) para diagnosticar.
+  const extractedPrompt = extractUserPrompt(body);
+  if (!extractedPrompt) {
+    void saveEmptyPrompt({
+      protocol: options.protocol || 'Chat Completions',
+      clientIp: clientIp || '',
+      requestedModel: requested,
+      targetModel: target,
+      extractedPrompt: '',
+      body
+    });
+  }
 
   // Salva last_prompt.json sem clonar/consumir streams SSE em paralelo.
   // Em streaming, o texto e capturado pelo proprio leitor que encaminha chunks.
@@ -252,7 +267,7 @@ const CATALOG_META = new Map(
 // rastreado por modelo dentro do forwardToNvidia (deriva de body.model).
 async function invokeChatDirect(
   body: Record<string, unknown>,
-  options: { localToolInstructions?: boolean } = {}
+  options: { localToolInstructions?: boolean; protocol?: string } = {}
 ) {
   const requested = String(body.model || '').trim();
   if (!requested || requested === FIXED_CLIENT_MODEL) {
@@ -266,6 +281,17 @@ async function invokeChatDirect(
     const err: any = new Error(t('api.modelDeactivated', { model: requested }));
     err.status = 403;
     throw err;
+  }
+  const extractedPrompt = extractUserPrompt(body);
+  if (!extractedPrompt) {
+    void saveEmptyPrompt({
+      protocol: options.protocol || 'Direct Chat Completions',
+      clientIp: '127.0.0.1',
+      requestedModel: requested,
+      targetModel: requested,
+      extractedPrompt: '',
+      body
+    });
   }
   const overridden = { ...body, model: requested };
   const upstreamBody = options.localToolInstructions === false
@@ -449,7 +475,7 @@ app.post('/v1/chat/completions', async (context) => {
 });
 app.post('/v1/responses', async (context) => {
   try {
-    return await responsesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', { abortSignal: context.req.raw.signal }));
+    return await responsesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', { abortSignal: context.req.raw.signal, protocol: 'Responses' }));
   } catch (error: any) {
     const status = error?.status === 403 ? 403 : 503;
     void saveLastError({
@@ -465,7 +491,7 @@ app.post('/v1/responses', async (context) => {
 });
 app.post('/v1/messages', async (context) => {
   try {
-    return await anthropicMessagesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', { abortSignal: context.req.raw.signal }));
+    return await anthropicMessagesApi(context, (body) => invokeChat(body, clientIpMap.get(context) || '', { abortSignal: context.req.raw.signal, protocol: 'Anthropic Messages' }));
   } catch (error: any) {
     const status = error?.status === 403 ? 403 : 503;
     void saveLastError({
@@ -521,7 +547,7 @@ app.get('/v1/models/available', (context) => {
 app.post('/v1/direct/chat/completions', async (context) => {
   try {
     return await invokeChatDirect(await context.req.json<Record<string, unknown>>(), {
-      localToolInstructions: false
+      localToolInstructions: false, protocol: 'Direct Chat Completions'
     });
   } catch (error: any) {
     const status = error?.status === 400 ? 400 : error?.status === 403 ? 403 : 503;
@@ -543,7 +569,7 @@ app.post('/v1/direct/chat/completions', async (context) => {
 // originais, mas passando o invocador que honra o modelo do corpo.
 app.post('/v1/direct/responses', async (context) => {
   try {
-    return await responsesApi(context, invokeChatDirect);
+    return await responsesApi(context, (body) => invokeChatDirect(body, { protocol: 'Direct Responses' }));
   } catch (error: any) {
     const status = error?.status === 400 ? 400 : error?.status === 403 ? 403 : 503;
     void saveLastError({
@@ -562,7 +588,7 @@ app.post('/v1/direct/responses', async (context) => {
 });
 app.post('/v1/direct/messages', async (context) => {
   try {
-    return await anthropicMessagesApi(context, invokeChatDirect);
+    return await anthropicMessagesApi(context, (body) => invokeChatDirect(body, { protocol: 'Direct Anthropic Messages' }));
   } catch (error: any) {
     const status = error?.status === 400 ? 400 : error?.status === 403 ? 403 : 503;
     void saveLastError({
