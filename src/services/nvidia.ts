@@ -73,7 +73,6 @@ type ToolCallDraft = {
   };
 };
 
-const EMPTY_RESPONSE_MAX_RETRIES = 3;
 const DEFAULT_STREAM_KEEP_ALIVE_MS = 5_000;
 const SSE_KEEP_ALIVE_CHUNK = new TextEncoder().encode(': keep-alive\n\n');
 const SSE_DONE_CHUNK = new TextEncoder().encode('data: [DONE]\n\n');
@@ -506,18 +505,8 @@ async function makeSuccessResponse(
       model: attempt.model,
       timestamp: Date.now()
     });
-    if (emptyRetryState) {
-      emptyRetryState.count++;
-      if (emptyRetryState.count < EMPTY_RESPONSE_MAX_RETRIES) {
-        return undefined;
-      }
-    }
-    if (clientWantsStream) {
-      const headers = cloneHeaders(attempt.response);
-      headers.set('content-type', 'text/event-stream');
-      return new Response(ensureSseDone(text), { status: 200, headers });
-    }
-    return Response.json(completion, { status: 200, headers: { 'cache-control': 'no-store' } });
+    if (emptyRetryState) emptyRetryState.count++;
+    return undefined;
   }
 
   onResponseText?.(String(completion.choices?.[0]?.message?.content || ''), attempt.model);
@@ -723,16 +712,7 @@ export async function forwardToNvidia(
         markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, totalTokens: usageInfo?.total_tokens, promptTokens: usageInfo?.prompt_tokens, completionTokens: usageInfo?.completion_tokens, model: activeModel, timestamp: now() });
 
         emptyRetryState.count++;
-        if (emptyRetryState.count < EMPTY_RESPONSE_MAX_RETRIES) {
-          continue;
-        }
-
-        if (clientWantsStream) {
-          const headers = cloneHeaders(response);
-          headers.set('content-type', 'text/event-stream');
-          return new Response(ensureSseDone(text), { status: 200, headers });
-        }
-        return Response.json(completion, { status: 200, headers: { 'cache-control': 'no-store' } });
+        continue;
       }
       onResponseText?.(String(completion.choices?.[0]?.message?.content || ''), activeModel);
       markApiResponseCompleted({ apiNumber, requestStartedAt, attempt, maxAttempts, totalTokens: usageInfo?.total_tokens, promptTokens: usageInfo?.prompt_tokens, completionTokens: usageInfo?.completion_tokens, model: activeModel, timestamp: now() });

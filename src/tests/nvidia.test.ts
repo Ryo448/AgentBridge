@@ -325,14 +325,20 @@ test('NVIDIA forwarding silently retries empty non-streaming completions', async
   assert.equal(upstreamError?.model, 'empty-model');
   unsubscribe();
 });
-test('NVIDIA forwarding returns empty response with 200 after 3 empty retries', async () => {
+test('NVIDIA forwarding keeps retrying empty completions until real content arrives', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['nvapi-empty'], requestDelayMs: 0 });
   let calls = 0;
   const fakeFetch: typeof fetch = async () => {
     calls++;
+    if (calls <= 4) {
+      return new Response([
+        'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":0,"total_tokens":3}}\n\n',
+        'data: [DONE]\n\n'
+      ].join(''), { headers: { 'content-type': 'text/event-stream' } });
+    }
     return new Response([
-      'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":0,"total_tokens":3}}\n\n',
+      'data: {"choices":[{"delta":{"content":"real after empties"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":3,"total_tokens":6}}\n\n',
       'data: [DONE]\n\n'
     ].join(''), { headers: { 'content-type': 'text/event-stream' } });
   };
@@ -341,9 +347,8 @@ test('NVIDIA forwarding returns empty response with 200 after 3 empty retries', 
   const body = await response.json() as any;
 
   assert.equal(response.status, 200);
-  assert.equal(calls, 3);
-  const content = body.choices?.[0]?.message?.content;
-  assert.equal(content, '');
+  assert.equal(calls, 5);
+  assert.equal(body.choices?.[0]?.message?.content, 'real after empties');
 });
 test('NVIDIA forwarding logs upstream HTTP errors', async () => {
   clearRuntimeConfig();
