@@ -247,6 +247,117 @@ test('NVIDIA forwarding emits SSE keep-alives while streaming upstream is idle',
   await reader.cancel();
 });
 
+test('NVIDIA forwarding releases a role prelude with the first text delta without waiting for completion', async () => {
+  clearRuntimeConfig();
+  setRuntimeConfig({ apiKeys: ['nvapi-role-prelude'], requestDelayMs: 0 });
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const roleChunk = 'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n';
+  const contentChunk = 'data: {"choices":[{"delta":{"content":"Oi"}}]}\n\n';
+  const finishChunk = 'data: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}\n\n';
+  let upstreamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let signalReady!: () => void;
+  const upstreamReady = new Promise<void>((resolve) => {
+    signalReady = resolve;
+  });
+  const fakeFetch: typeof fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      upstreamController = controller;
+      controller.enqueue(encoder.encode(roleChunk));
+      signalReady();
+    }
+  }), { headers: { 'content-type': 'text/event-stream' } });
+
+  let responseResolved = false;
+  const responsePromise = forwardToNvidia(
+    { model: 'test', stream: true },
+    fakeFetch,
+    0
+  ).then((response) => {
+    responseResolved = true;
+    return response;
+  });
+
+  await upstreamReady;
+  await Promise.resolve();
+  assert.equal(responseResolved, false);
+
+  assert.ok(upstreamController);
+  upstreamController.enqueue(encoder.encode(contentChunk));
+  const response = await responsePromise;
+  assert.equal(responseResolved, true);
+  assert.ok(response.body);
+  const reader = response.body.getReader();
+
+  const first = await reader.read();
+  assert.equal(decoder.decode(first.value), roleChunk + contentChunk);
+
+  upstreamController.enqueue(encoder.encode(finishChunk));
+  upstreamController.close();
+  const finish = await reader.read();
+  assert.equal(decoder.decode(finish.value), finishChunk);
+  const done = await reader.read();
+  assert.equal(decoder.decode(done.value), 'data: [DONE]\n\n');
+});
+
+test('NVIDIA hedge releases the winning tool call as soon as it starts', async () => {
+  clearRuntimeConfig();
+  setRuntimeConfig({ apiKeys: ['nvapi-hedge-tool'], requestDelayMs: 0 });
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const roleChunk = 'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n';
+  const toolStartChunk = 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"buscar","arguments":""}}]}}]}\n\n';
+  const toolFinishChunk = 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\\"q\\\":\\\"teste\\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n';
+  let upstreamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let signalReady!: () => void;
+  const upstreamReady = new Promise<void>((resolve) => {
+    signalReady = resolve;
+  });
+  const fakeFetch: typeof fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      upstreamController = controller;
+      controller.enqueue(encoder.encode(roleChunk));
+      signalReady();
+    }
+  }), { headers: { 'content-type': 'text/event-stream' } });
+
+  let responseResolved = false;
+  const responsePromise = forwardToNvidia(
+    { model: 'primary-model', stream: true },
+    fakeFetch,
+    0,
+    {},
+    {
+      enableHedge: true,
+      resolveModel: () => null
+    }
+  ).then((response) => {
+    responseResolved = true;
+    return response;
+  });
+
+  await upstreamReady;
+  await Promise.resolve();
+  assert.equal(responseResolved, false);
+
+  assert.ok(upstreamController);
+  upstreamController.enqueue(encoder.encode(toolStartChunk));
+  const response = await responsePromise;
+  assert.equal(responseResolved, true);
+  assert.ok(response.body);
+  const reader = response.body.getReader();
+
+  const first = await reader.read();
+  assert.equal(decoder.decode(first.value), roleChunk + toolStartChunk);
+
+  upstreamController.enqueue(encoder.encode(toolFinishChunk));
+  upstreamController.close();
+  const finish = await reader.read();
+  assert.equal(decoder.decode(finish.value), toolFinishChunk);
+  const done = await reader.read();
+  assert.equal(decoder.decode(done.value), 'data: [DONE]\n\n');
+});
+
 test('NVIDIA forwarding does not log local stream disposal as client cancellation', async () => {
   clearRuntimeConfig();
   setRuntimeConfig({ apiKeys: ['nvapi-local-dispose'], requestDelayMs: 0 });

@@ -84,10 +84,21 @@ type ToolCallDraft = {
 const EMPTY_RESPONSE_MAX_RETRIES = 3;
 const MAX_500_RETRIES = 3;
 const DEFAULT_STREAM_KEEP_ALIVE_MS = 5_000;
+const SSE_BUFFER_MAX_LENGTH = 65_536;
+const SSE_BUFFER_TAIL_LENGTH = 16_384;
 const SSE_KEEP_ALIVE_CHUNK = new TextEncoder().encode(': keep-alive\n\n');
 const SSE_DONE_CHUNK = new TextEncoder().encode('data: [DONE]\n\n');
 
 type SseCompletionReason = false | 'done' | 'finish_reason';
+type SseInspectionState = {
+  buffer: string;
+  responseText: string;
+  hasOutput: boolean;
+  hasUpstreamError: boolean;
+  totalTokens?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+};
 
 function timeoutError(milliseconds: number) {
   return new Error(`A API NVIDIA nao respondeu em ${Math.round(milliseconds / 1000)}s.`);
@@ -156,13 +167,15 @@ function extractUsage(data: string): { totalTokens?: number; promptTokens?: numb
   }
 }
 
-function appendSseTextAndCompletionReason(state: { buffer: string; responseText: string; totalTokens?: number; promptTokens?: number; completionTokens?: number }, text: string): SseCompletionReason {
+function appendSseTextAndCompletionReason(state: SseInspectionState, text: string): SseCompletionReason {
   let completionReason: SseCompletionReason = false;
   state.buffer += text;
   while (true) {
     const boundary = state.buffer.search(/\r?\n\r?\n/);
     if (boundary < 0) {
-      state.buffer = state.buffer.slice(-256);
+      if (state.buffer.length > SSE_BUFFER_MAX_LENGTH) {
+        state.buffer = state.buffer.slice(-SSE_BUFFER_TAIL_LENGTH);
+      }
       return completionReason;
     }
     const raw = state.buffer.slice(0, boundary);
@@ -183,9 +196,18 @@ function appendSseTextAndCompletionReason(state: { buffer: string; responseText:
       }
       try {
         const parsed = JSON.parse(data);
+        if (parsed?.error && typeof parsed.error === 'object') {
+          state.hasUpstreamError = true;
+        }
         const choice = parsed?.choices?.[0];
         const content = choice?.delta?.content;
-        if (typeof content === 'string') state.responseText += content;
+        if (typeof content === 'string') {
+          state.responseText += content;
+          if (state.responseText.trim().length > 0) state.hasOutput = true;
+        }
+        if (Array.isArray(choice?.delta?.tool_calls) && choice.delta.tool_calls.length > 0) {
+          state.hasOutput = true;
+        }
         if (choice?.finish_reason) completionReason = 'finish_reason';
       } catch {
         // Ignora eventos SSE que nao sejam JSON de chat completion.
@@ -211,7 +233,12 @@ function streamWithLogs(input: {
   let responseTextReported = false;
   let pendingRead: Promise<ReadableStreamReadResult<Uint8Array>> | null = null;
   const decoder = new TextDecoder();
-  const sseState: { buffer: string; responseText: string; totalTokens?: number; promptTokens?: number; completionTokens?: number } = { buffer: '', responseText: '' };
+  const sseState: SseInspectionState = {
+    buffer: '',
+    responseText: '',
+    hasOutput: false,
+    hasUpstreamError: false
+  };
   const keepAliveMs = Math.max(1, input.keepAliveMs ?? DEFAULT_STREAM_KEEP_ALIVE_MS);
   const getPendingRead = () => {
     pendingRead ??= input.reader.read();
@@ -603,11 +630,69 @@ function ensureSseDone(text: string) {
   return `${text}${separator}data: [DONE]\n\n`;
 }
 
-function sseTextHasOutput(text: string) {
-  try {
-    return completionHasOutput(aggregateChatCompletion(parseSseEvents(text)));
-  } catch {
-    return false;
+function concatChunks(chunks: Uint8Array[], totalLength: number) {
+  if (chunks.length === 1) return chunks[0];
+  const combined = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return combined;
+}
+
+type StreamPreludeResult =
+  | { kind: 'output'; firstChunk: Uint8Array }
+  | { kind: 'complete'; text: string };
+
+async function readUntilOutputOrCompletion(
+  firstChunk: Uint8Array,
+  reader: ReadableStreamDefaultReader<Uint8Array>
+): Promise<StreamPreludeResult> {
+  const decoder = new TextDecoder();
+  const state: SseInspectionState = {
+    buffer: '',
+    responseText: '',
+    hasOutput: false,
+    hasUpstreamError: false
+  };
+  const chunks: Uint8Array[] = [];
+  let totalLength = 0;
+  let text = '';
+
+  const inspect = (chunk: Uint8Array) => {
+    chunks.push(chunk);
+    totalLength += chunk.length;
+    const chunkText = decoder.decode(chunk, { stream: true });
+    text += chunkText;
+    return appendSseTextAndCompletionReason(state, chunkText);
+  };
+  const complete = async (): Promise<StreamPreludeResult> => {
+    await reader.cancel().catch(() => {});
+    text += decoder.decode();
+    return { kind: 'complete', text };
+  };
+
+  if (firstChunk.length) {
+    const completionReason = inspect(firstChunk);
+    if (!state.hasUpstreamError && state.hasOutput) {
+      return { kind: 'output', firstChunk: concatChunks(chunks, totalLength) };
+    }
+    if (completionReason) return complete();
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      text += decoder.decode();
+      return { kind: 'complete', text };
+    }
+    if (!value) continue;
+    const completionReason = inspect(value);
+    if (!state.hasUpstreamError && state.hasOutput) {
+      return { kind: 'output', firstChunk: concatChunks(chunks, totalLength) };
+    }
+    if (completionReason) return complete();
   }
 }
 
@@ -616,7 +701,12 @@ async function readRemainingText(
   reader: ReadableStreamDefaultReader<Uint8Array>
 ) {
   const decoder = new TextDecoder();
-  const sseState: { buffer: string; responseText: string; totalTokens?: number; promptTokens?: number; completionTokens?: number } = { buffer: '', responseText: '' };
+  const sseState: SseInspectionState = {
+    buffer: '',
+    responseText: '',
+    hasOutput: false,
+    hasUpstreamError: false
+  };
   let text = firstChunk.length ? decoder.decode(firstChunk, { stream: true }) : '';
   if (firstChunk.length && appendSseTextAndCompletionReason(sseState, text)) {
     await reader.cancel().catch(() => {});
@@ -677,7 +767,29 @@ async function makeSuccessResponse(
   emptyRetryState?: { count: number },
   http500State?: { count: number }
 ): Promise<Response | undefined> {
-  const text = await readRemainingText(attempt.firstChunk, attempt.reader);
+  let text: string;
+  if (clientWantsStream) {
+    const prelude = await readUntilOutputOrCompletion(attempt.firstChunk, attempt.reader);
+    if (prelude.kind === 'output') {
+      const headers = cloneHeaders(attempt.response);
+      headers.set('content-type', 'text/event-stream');
+      return new Response(streamWithLogs({
+        firstChunk: prelude.firstChunk,
+        reader: attempt.reader,
+        apiNumber: attempt.apiNumber,
+        requestStartedAt,
+        attempt: 1,
+        maxAttempts,
+        model: attempt.model,
+        onResponseText,
+        keepAliveMs,
+        abortSignal
+      }), { status: attempt.response.status, statusText: attempt.response.statusText, headers });
+    }
+    text = prelude.text;
+  } else {
+    text = await readRemainingText(attempt.firstChunk, attempt.reader);
+  }
   const events = parseSseEvents(text);
   const sseError = extractSseUpstreamError(events);
   const completion = aggregateChatCompletion(events);
@@ -982,15 +1094,29 @@ export async function forwardToNvidia(
 
       markApiSuccess({ apiNumber, model: activeModel, timestamp: now() });
 
-      if (clientWantsStream && sseTextHasOutput(new TextDecoder().decode(value))) {
-        const headers = cloneHeaders(response);
-        headers.set('content-type', 'text/event-stream');
-        return new Response(streamWithLogs({
-          firstChunk: value, reader, apiNumber, requestStartedAt, attempt, maxAttempts, model: activeModel, onResponseText: onResponseText, keepAliveMs: options.streamKeepAliveMs, abortSignal: options.abortSignal
-        }), { status: response.status, statusText: response.statusText, headers });
+      let text: string;
+      if (clientWantsStream) {
+        const prelude = await readUntilOutputOrCompletion(value, reader);
+        if (prelude.kind === 'output') {
+          const headers = cloneHeaders(response);
+          headers.set('content-type', 'text/event-stream');
+          return new Response(streamWithLogs({
+            firstChunk: prelude.firstChunk,
+            reader,
+            apiNumber,
+            requestStartedAt,
+            attempt,
+            maxAttempts,
+            model: activeModel,
+            onResponseText,
+            keepAliveMs: options.streamKeepAliveMs,
+            abortSignal: options.abortSignal
+          }), { status: response.status, statusText: response.statusText, headers });
+        }
+        text = prelude.text;
+      } else {
+        text = await readRemainingText(value, reader);
       }
-
-      const text = await readRemainingText(value, reader);
       const events = parseSseEvents(text);
       const sseError = extractSseUpstreamError(events);
       const completion = aggregateChatCompletion(events);
@@ -1181,8 +1307,9 @@ async function hedgeForward(
   })();
 
   // Timer do hedge
+  let hedgeTimerHandle: NodeJS.Timeout | undefined;
   const hedgeTimer = new Promise<'timeout'>((resolve) => {
-    setTimeout(() => resolve('timeout'), HEDGE_SLOW_THRESHOLD_MS);
+    hedgeTimerHandle = setTimeout(() => resolve('timeout'), HEDGE_SLOW_THRESHOLD_MS);
   });
 
   // Race: HTTP do primario vs timer
@@ -1190,6 +1317,7 @@ async function hedgeForward(
     primaryHttp.then((r) => ({ type: 'primary' as const, result: r })),
     hedgeTimer.then(() => ({ type: 'hedge' as const }))
   ]);
+  if (first.type === 'primary' && hedgeTimerHandle) clearTimeout(hedgeTimerHandle);
 
   // ---- Caso A: Primario respondeu HTTP (qualquer status) antes do timer ----
   if (first.type === 'primary') {

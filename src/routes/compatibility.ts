@@ -2,7 +2,10 @@ import type { Context } from 'hono';
 import { stream as honoStream } from 'hono/streaming';
 import { v4 as uuidv4 } from 'uuid';
 
+const SSE_BUFFER_MAX_LENGTH = 65_536;
+const SSE_BUFFER_TAIL_LENGTH = 16_384;
 type ChatInvoker = (body: Record<string, unknown>) => Promise<Response>;
+
 
 type ChatToolCall = {
   index?: number;
@@ -192,7 +195,12 @@ async function* readChatEvents(response: Response) {
 
       while (true) {
         const boundary = buffer.search(/\r?\n\r?\n/);
-        if (boundary < 0) break;
+        if (boundary < 0) {
+          if (buffer.length > SSE_BUFFER_MAX_LENGTH) {
+            buffer = buffer.slice(-SSE_BUFFER_TAIL_LENGTH);
+          }
+          break;
+        }
         const raw = buffer.slice(0, boundary);
         const separatorLength = buffer[boundary] === '\r' ? 4 : 2;
         buffer = buffer.slice(boundary + separatorLength);

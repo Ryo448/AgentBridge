@@ -26,8 +26,8 @@ function lastErrorDirectory(): string {
     || path.join(homedir(), 'Documents', 'AgentBridge');
 }
 
-function lastErrorPath(): string {
-  return path.join(lastErrorDirectory(), FILE_NAME);
+function lastErrorPath(directory = lastErrorDirectory()): string {
+  return path.join(directory, FILE_NAME);
 }
 
 export interface LastErrorEntry {
@@ -45,9 +45,9 @@ interface LastErrorFile {
 
 let writeQueue: Promise<void> = Promise.resolve();
 
-async function readEntries(): Promise<LastErrorEntry[]> {
+async function readEntries(filePath: string): Promise<LastErrorEntry[]> {
   try {
-    const raw = await readFile(lastErrorPath(), 'utf8');
+    const raw = await readFile(filePath, 'utf8');
     const parsed: LastErrorFile = JSON.parse(raw);
     if (Array.isArray(parsed?.entries)) return parsed.entries;
     return [];
@@ -60,12 +60,13 @@ async function readEntries(): Promise<LastErrorEntry[]> {
 // A entrada mais recente fica no indice 0 (topo do array).
 // Nunca lanca: uma falha ao salvar o log nao pode derrubar a resposta ao cliente.
 export function saveLastError(entry: LastErrorEntry): Promise<void> {
+  const directory = lastErrorDirectory();
+  const filePath = lastErrorPath(directory);
   writeQueue = writeQueue
     .catch(() => undefined)
     .then(async () => {
-      const directory = lastErrorDirectory();
       await mkdir(directory, { recursive: true });
-      const entries = await readEntries();
+      const entries = await readEntries(filePath);
       entries.unshift({
         savedAt: new Date().toISOString(),
         model: entry.model || '',
@@ -76,7 +77,7 @@ export function saveLastError(entry: LastErrorEntry): Promise<void> {
       });
       const trimmed = entries.slice(0, MAX_ENTRIES);
       const payload = JSON.stringify({ entries: trimmed }, null, 2);
-      await writeFile(lastErrorPath(), payload, 'utf8');
+      await writeFile(filePath, payload, 'utf8');
     })
     .catch((error) => {
       if (!process.env.TEST_MOCK_PLAYWRIGHT) {
