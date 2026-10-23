@@ -1101,7 +1101,9 @@ export async function forwardToNvidia(
             continue;
           }
         }
-        if (response.status === 500 && http500State.count < MAX_500_RETRIES && attempt < maxAttempts) {
+        // HTTP 500 pode ser transitório mesmo quando existe apenas uma chave.
+        // O limite próprio de 500 controla as tentativas; não dependa do número de chaves.
+        if (response.status === 500 && http500State.count < MAX_500_RETRIES) {
           continue;
         }
         return responseFromUpstream(response);
